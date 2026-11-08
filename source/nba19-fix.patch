@@ -1,0 +1,2374 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0ce91fc9..ae1497f3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,5 +1,6 @@
+ # SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ # SPDX-License-Identifier: GPL-2.0-or-later
++# Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ # Version 3.24 needed for FetchContent OVERRIDE_FIND_PACKAGE
+ cmake_minimum_required(VERSION 3.24)
+@@ -859,6 +860,8 @@ set(NET_CORE  src/core/net/guest_net.cpp
+               src/core/net/guest_net.h
+               src/core/net/host_net.cpp
+               src/core/net/host_net.h
++              src/core/net/host_override.cpp
++              src/core/net/host_override.h
+               src/core/net/p2p_codec.cpp
+               src/core/net/p2p_codec.h
+               src/core/net/p2p_crypto.cpp
+@@ -1041,6 +1044,7 @@ set(SHADER_RECOMPILER src/shader_recompiler/profile.h
+                       src/shader_recompiler/backend/spirv/emit_spirv_quad_rect.h
+                       src/shader_recompiler/backend/spirv/emit_spirv_select.cpp
+                       src/shader_recompiler/backend/spirv/emit_spirv_shared_memory.cpp
++                      src/shader_recompiler/backend/spirv/emit_spirv_shared_memory_bounds.h
+                       src/shader_recompiler/backend/spirv/emit_spirv_special.cpp
+                       src/shader_recompiler/backend/spirv/emit_spirv_undefined.cpp
+                       src/shader_recompiler/backend/spirv/emit_spirv_warp.cpp
+diff --git a/README-NBA19.md b/README-NBA19.md
+new file mode 100644
+index 00000000..719a633b
+--- /dev/null
++++ b/README-NBA19.md
+@@ -0,0 +1,49 @@
++# shadPS4 — fork no oficial con arreglos para NBA LIVE 19
++
++> **Aviso:** esto es un fork **no oficial** de [shadPS4](https://github.com/shadps4-emu/shadPS4).
++> No está afiliado al equipo de shadPS4 ni respaldado por él. Los errores que encuentres con esta
++> versión **no** se deben reportar en el repositorio oficial.
++>
++> **Unofficial fork** of shadPS4 with fixes for NBA LIVE 19 (CUSA11355). Not affiliated with or
++> endorsed by the shadPS4 team. Please do not report issues from this build upstream.
++
++- **Base:** shadPS4 `main`, commit [`b72489d`](https://github.com/shadps4-emu/shadPS4/commit/b72489d8c24e63fc56a29fe2c90120ab768a210d) (v0.19.1 WIP, 12/10/2026).
++- **Licencia:** GPL-2.0-or-later, igual que el proyecto original (ver `LICENSE` y `LICENSES/`).
++  Se conservan todos los avisos de copyright originales; los archivos modificados llevan una
++  línea `Modified 2026-10-13 ...` bajo su cabecera SPDX.
++
++## Cambios respecto a shadPS4
++
++| Problema en NBA LIVE 19 | Causa | Cambio |
++|---|---|---|
++| Se queda para siempre en "CARGANDO" | En Windows, `TimedMutex::try_lock_until` devolvía *timeout* sin intentar coger el mutex cuando el plazo ya había vencido (timeout 0). El juego usa un *timed lock* con 0 µs como *trylock*. | `src/core/libraries/kernel/sync/mutex.h`: intentar `try_lock()` una vez cuando el plazo ha vencido (igual que `std::timed_mutex`). |
++| Destellos / "fuego" en pelo, piel, ropa, banquillo y suelo (aleatorio por sesión) | Los cubemaps de reflejos BC6H solo tienen datos hasta el nivel de 4x4; el juego los declara con más niveles y los niveles 2x2/1x1 contenían basura (memoria ajena o nunca escrita). | `texture_cache/image_view.cpp`: las vistas de muestreo de texturas comprimidas por bloques terminan en el último nivel de bloque completo. Refuerzos en `texture_cache.cpp`, `image.h` y `vk_runtime.cpp` (`guest_valid_levels`, `ReplicateMip`). |
++| Cierre con "Out of order flip IRQ" (sobre todo con `vblank_frequency: 120`) | Con vblank alto puede llegar la IRQ de flip EOP de un búfer que ya no está pendiente y el emulador abortaba. | `src/core/libraries/videoout/video_out.cpp`: se registra un aviso y se ignora esa IRQ en vez de cerrar. (v2) |
++| — | Límites de memoria compartida (LDS) en shaders de cómputo | PR oficial pendiente [#4796](https://github.com/shadps4-emu/shadPS4/pull/4796), adaptado a esta base. |
++
++También incluye cambios menores heredados de un trabajo anterior con FIFA 14
++(`sceAppContentTemporaryDataMount`, guardado del gamma en la capa de depuración, captura RenderDoc
++de varios envíos con `SHADPS4_RDOC_SUBMITS`) y un sistema de sondas de depuración por breakpoints de
++hardware (`src/core/signals.cpp`), inactivo salvo que se armen desde una herramienta externa.
++
++Documentación técnica completa del diagnóstico: ver la release (PDF).
++
++## Compilar
++
++Igual que shadPS4 (ver `documents/building-windows.md`). Ejemplo en Windows con clang-cl:
++
++```
++cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
++cmake --build build --parallel
++```
++
++## Qué NO incluye este repositorio
++
++- Ningún juego, firmware, módulo de sistema (`.sprx`), clave ni archivo de Sony o de EA.
++  Cada usuario debe usar su propia copia legal del juego y sus propios módulos de sistema.
++- Este proyecto no fomenta la piratería.
++
++## Configuración recomendada para NBA LIVE 19
++
++`%APPDATA%\shadPS4\custom_configs\CUSA11355.json`: sin red (`connected_to_network: false`, los
++servidores de EA están cerrados) y `vblank_frequency: 120` (repeticiones y cinemáticas a 60 FPS).
+diff --git a/src/core/cpu_patches.cpp b/src/core/cpu_patches.cpp
+index 605fcf36..cb4e1281 100644
+--- a/src/core/cpu_patches.cpp
++++ b/src/core/cpu_patches.cpp
+@@ -2477,7 +2477,387 @@ void RegisterPatchModule(void* module_ptr, u64 module_size, void* trampoline_are
+                                           trampoline_area_size));
+ }
+ 
++#if defined(_WIN32)
++// NBA LIVE 19 online: en Windows no hay parcheo previo y RCPPS/RSQRTPS (y sus formas VEX) son legales en
++// Intel, asi que nunca pasan por el manejador de instrucciones ilegales: el juego usaba los resultados
++// aproximados de Intel mientras una CPU AMD da otros, y en el online por entradas (NetGameDist) las dos
++// simulaciones divergian (Online::DesyncDetector). Aqui se parchean por adelantado para dar el resultado
++// de AMD. Casi todas miden 4 bytes (no cabe el salto de 5), asi que se lleva al trampolin tambien la
++// instruccion vecina (la siguiente o, si no se puede, la anterior), siempre que no sea destino de un
++// salto directo ni controle el flujo; los desplazamientos relativos a RIP se recalculan.
++static bool IsReciprocalMnemonic(ZydisMnemonic m) {
++    return m == ZYDIS_MNEMONIC_RCPPS || m == ZYDIS_MNEMONIC_RSQRTPS || m == ZYDIS_MNEMONIC_VRCPPS ||
++           m == ZYDIS_MNEMONIC_VRSQRTPS;
++}
++
++/// Modo de los reciprocos: exacto (por defecto; 1/x y 1/raiz(x) IEEE, mismo resultado en cualquier
++/// CPU, asi juegan juntos Intel y AMD de cualquier generacion) o amd (NBA_RCP_MODO=amd: solo en
++/// Intel, imita el resultado aproximado de AMD con las tablas de shadPS4, como en la PS4).
++static bool ReciprocalExactMode() {
++    static const bool exact = [] {
++        const char* m = std::getenv("NBA_RCP_MODO");
++        return m == nullptr || std::string_view{m} != "amd";
++    }();
++    return exact;
++}
++
++/// VRCPPS/VRSQRTPS -> resultado exacto: dst = 1/src o 1/raiz(src) con VDIVPS/VSQRTPS. Conserva todos
++/// los registros salvo dst (usa dos vectores y RAX de apoyo, guardados por debajo de la red zone) y
++/// no toca los flags.
++static void GenerateExactReciprocal(void* address, const ZydisDecodedInstruction& instruction,
++                                    const ZydisDecodedOperand* operands, Xbyak::CodeGenerator& c,
++                                    bool rsqrt) {
++    const auto dst = ZydisToXbyakRegisterOperand(operands[0]);
++    ASSERT_MSG(dst.isXMM() || dst.isYMM(), "operand 0 must be an XMM or YMM register");
++    const bool is_src_mem = operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY;
++
++    std::array<bool, 16> taken{};
++    taken[dst.getIdx()] = true;
++    Xbyak::Xmm src_reg;
++    if (!is_src_mem) {
++        const auto src = ZydisToXbyakRegisterOperand(operands[1]);
++        taken[src.getIdx()] = true;
++        src_reg = Xbyak::Xmm(dst.getKind(), src.getIdx());
++    }
++    const auto it1 = std::find(taken.begin(), taken.end(), false);
++    const auto it2 = std::find(std::next(it1), taken.end(), false);
++    const int one_idx = static_cast<int>(it1 - taken.begin());
++    const int val_idx = static_cast<int>(it2 - taken.begin());
++    const Xbyak::Xmm dst_reg(dst.getKind(), dst.getIdx());
++    const Xbyak::Xmm one(dst.getKind(), one_idx);
++    const Xbyak::Xmm val(dst.getKind(), val_idx);
++
++    const int rsp_disp = 128 + 64;
++    c.lea(rsp, ptr[rsp - rsp_disp]);
++    c.vmovups(ptr[rsp], one.cvt256());
++    c.vmovups(ptr[rsp + 32], val.cvt256());
++    c.push(rax);
++    if (is_src_mem) {
++        if (operands[1].mem.base == ZYDIS_REGISTER_RIP) {
++            const u64 target = (u64)address + instruction.length + operands[1].mem.disp.value;
++            c.mov(rax, target);
++            c.vmovups(val, ptr[rax]);
++        } else {
++            ZydisDecodedOperand operand = operands[1];
++            if (operands[1].mem.base == ZYDIS_REGISTER_RSP) {
++                operand.mem.disp.size = 32;
++                operand.mem.disp.value += rsp_disp + 8; // lo que se reservo + RAX
++            }
++            c.vmovups(val, ZydisToXbyakMemoryOperand(operand));
++        }
++    } else {
++        c.vmovaps(val, src_reg);
++    }
++    if (rsqrt) {
++        c.vsqrtps(val, val);
++    }
++    c.mov(eax, 0x3f800000); // 1.0f
++    c.vmovd(Xbyak::Xmm(one_idx), eax);
++    c.vbroadcastss(one, Xbyak::Xmm(one_idx));
++    c.vdivps(one, one, val);
++    c.vmovaps(dst_reg, one);
++    c.pop(rax);
++    c.vmovups(val.cvt256(), ptr[rsp + 32]);
++    c.vmovups(one.cvt256(), ptr[rsp]);
++    c.lea(rsp, ptr[rsp + rsp_disp]);
++}
++
++struct SweptInstruction {
++    u8* code;
++    ZydisDecodedInstruction instruction;
++    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
++    bool flow;
++};
++
++static bool IsFlowInstruction(const ZydisDecodedInstruction& ins) {
++    switch (ins.meta.category) {
++    case ZYDIS_CATEGORY_COND_BR:
++    case ZYDIS_CATEGORY_UNCOND_BR:
++    case ZYDIS_CATEGORY_CALL:
++    case ZYDIS_CATEGORY_RET:
++    case ZYDIS_CATEGORY_SYSCALL:
++    case ZYDIS_CATEGORY_INTERRUPT:
++    case ZYDIS_CATEGORY_SYSTEM:
++        return true;
++    default:
++        // Ojo: ZYDIS_ATTRIB_IS_RELATIVE tambien marca los accesos a memoria relativos a RIP.
++        return false;
++    }
++}
++
++static const ZydisDecodedOperand* RelativeImmediate(const SweptInstruction& s) {
++    for (u32 i = 0; i < s.instruction.operand_count; i++) {
++        if (s.operands[i].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && s.operands[i].imm.is_relative) {
++            return &s.operands[i];
++        }
++    }
++    return nullptr;
++}
++
++/// Emite en el trampolin el equivalente de una instruccion movida: el reciproco emulado o una copia
++/// con el desplazamiento RIP corregido. Devuelve false si no se puede reubicar.
++static bool EmitRelocated(const SweptInstruction& s, Xbyak::CodeGenerator& c) {
++    const auto& ins = s.instruction;
++    if (IsReciprocalMnemonic(ins.mnemonic)) {
++        const bool rsqrt =
++            ins.mnemonic == ZYDIS_MNEMONIC_RSQRTPS || ins.mnemonic == ZYDIS_MNEMONIC_VRSQRTPS;
++        const bool vex = ins.mnemonic == ZYDIS_MNEMONIC_VRSQRTPS || ins.mnemonic == ZYDIS_MNEMONIC_VRCPPS;
++        if (ReciprocalExactMode()) {
++            GenerateExactReciprocal(s.code, ins, s.operands, c, rsqrt);
++        } else {
++            GenerateReciprocalInstruction(s.code, ins, s.operands, c, rsqrt, vex);
++        }
++        return true;
++    }
++    if (const auto* rel = RelativeImmediate(s)) {
++        // Salto/llamada relativos: se reescriben con el destino absoluto.
++        const void* target = s.code + ins.length + rel->imm.value.s;
++        using LT = Xbyak::CodeGenerator::LabelType;
++        switch (ins.mnemonic) {
++        case ZYDIS_MNEMONIC_JMP: c.jmp(target, LT::T_NEAR); return true;
++        case ZYDIS_MNEMONIC_CALL: c.call(target); return true;
++        case ZYDIS_MNEMONIC_JB: c.jb(target); return true;
++        case ZYDIS_MNEMONIC_JBE: c.jbe(target); return true;
++        case ZYDIS_MNEMONIC_JL: c.jl(target); return true;
++        case ZYDIS_MNEMONIC_JLE: c.jle(target); return true;
++        case ZYDIS_MNEMONIC_JNB: c.jnb(target); return true;
++        case ZYDIS_MNEMONIC_JNBE: c.jnbe(target); return true;
++        case ZYDIS_MNEMONIC_JNL: c.jnl(target); return true;
++        case ZYDIS_MNEMONIC_JNLE: c.jnle(target); return true;
++        case ZYDIS_MNEMONIC_JNO: c.jno(target); return true;
++        case ZYDIS_MNEMONIC_JNP: c.jnp(target); return true;
++        case ZYDIS_MNEMONIC_JNS: c.jns(target); return true;
++        case ZYDIS_MNEMONIC_JNZ: c.jnz(target); return true;
++        case ZYDIS_MNEMONIC_JO: c.jo(target); return true;
++        case ZYDIS_MNEMONIC_JP: c.jp(target); return true;
++        case ZYDIS_MNEMONIC_JS: c.js(target); return true;
++        case ZYDIS_MNEMONIC_JZ: c.jz(target); return true;
++        default: return false;
++        }
++    }
++    bool rip_relative = false;
++    for (u32 i = 0; i < ins.operand_count; i++) {
++        if (s.operands[i].type == ZYDIS_OPERAND_TYPE_MEMORY &&
++            s.operands[i].mem.base == ZYDIS_REGISTER_RIP) {
++            rip_relative = true;
++        }
++    }
++    u8 bytes[ZYDIS_MAX_INSTRUCTION_LENGTH];
++    std::memcpy(bytes, s.code, ins.length);
++    if (rip_relative) {
++        if (ins.raw.disp.size != 32) {
++            return false;
++        }
++        const s64 target = reinterpret_cast<s64>(s.code) + ins.length + ins.raw.disp.value;
++        const s64 new_disp = target - (reinterpret_cast<s64>(c.getCurr()) + ins.length);
++        if (new_disp < INT32_MIN || new_disp > INT32_MAX) {
++            return false;
++        }
++        const s32 disp32 = static_cast<s32>(new_disp);
++        std::memcpy(bytes + ins.raw.disp.offset, &disp32, sizeof(disp32));
++    }
++    for (u32 i = 0; i < ins.length; i++) {
++        c.db(bytes[i]);
++    }
++    return true;
++}
++
++static void RcpDebug(const char* fmt_str, const void* a, u64 b) {
++    static FILE* f = std::getenv("NBA_RCP_DEBUG") ? std::fopen("nba_rcp_debug.txt", "w") : nullptr;
++    if (f) {
++        std::fprintf(f, fmt_str, a, static_cast<unsigned long long>(b));
++        std::fputc(10, f);
++        std::fflush(f);
++    }
++}
++
++static void PrePatchReciprocalsWindows(u8* start, u64 size) {
++    if (std::getenv("NBA_NO_RCP_PATCH") != nullptr ||
++        (!ReciprocalExactMode() && !FilterIntelCPU(nullptr))) {
++        return;
++    }
++    RcpDebug("inicio %p tam %llu", start, size);
++    auto* module = GetModule(start);
++    if (module == nullptr) {
++        return;
++    }
++    std::unique_lock lock{module->mutex};
++    u8* const end = std::min(start + size, module->end);
++
++    // Pasada 1: barrido lineal. Solo se guarda lo imprescindible de cada instruccion (son millones).
++    struct Compact {
++        u8* code;
++        u8 length;
++        bool flow;
++        bool recip;
++        bool movable_flow; // salto/llamada/ret que EmitRelocated sabe llevar al trampolin
++    };
++    std::vector<Compact> list;
++    list.reserve(size / 4);
++    std::unordered_set<u8*> targets;
++    {
++        ZydisDecodedInstruction ins;
++        ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT];
++        for (u8* p = start; p < end;) {
++            const auto status =
++                Common::Decoder::Instance()->decodeInstruction(ins, ops, p, end - p);
++            if (!ZYAN_SUCCESS(status)) {
++                p++;
++                continue;
++            }
++            if ((ins.attributes & ZYDIS_ATTRIB_IS_RELATIVE) != 0) {
++                for (u32 k = 0; k < ins.operand_count; k++) {
++                    if (ops[k].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && ops[k].imm.is_relative) {
++                        targets.insert(p + ins.length + ops[k].imm.value.s);
++                    }
++                }
++            }
++            // Solo las formas VEX: el juego no usa RCPPS/RSQRTPS sin VEX y las que aparecen son datos
++            // decodificados por el barrido lineal.
++            const bool recip =
++                ins.mnemonic == ZYDIS_MNEMONIC_VRCPPS || ins.mnemonic == ZYDIS_MNEMONIC_VRSQRTPS;
++            const auto cat = ins.meta.category;
++            const bool movable_flow = cat == ZYDIS_CATEGORY_COND_BR || cat == ZYDIS_CATEGORY_UNCOND_BR ||
++                                      cat == ZYDIS_CATEGORY_CALL || cat == ZYDIS_CATEGORY_RET;
++            list.push_back({p, ins.length, IsFlowInstruction(ins), recip, movable_flow});
++            p += ins.length;
++        }
++    }
++    RcpDebug("pasada 1 hecha %p instrucciones %llu", start, list.size());
++    const auto decode = [end](const Compact& c, SweptInstruction& s) {
++        s.code = c.code;
++        s.flow = c.flow;
++        return ZYAN_SUCCESS(Common::Decoder::Instance()->decodeInstruction(
++            s.instruction, s.operands, c.code, end - c.code));
++    };
++
++    // Pasada 2: parcheo.
++    u32 patched = 0, skipped = 0;
++    std::vector<bool> done(list.size(), false);
++    auto& tg = module->trampoline_gen;
++    for (size_t i = 0; i < list.size(); i++) {
++        const auto& s = list[i];
++        if (done[i] || !s.recip) {
++            continue;
++        }
++        if (s.length >= NearJumpSize) {
++            // Cabe el salto: trampolin solo con el reciproco.
++            SweptInstruction single{};
++            bool ok = decode(s, single);
++            const size_t tramp_offset = tg.getSize();
++            void* const tramp_ptr = const_cast<u8*>(tg.getCurr());
++            try {
++                if (ok) {
++                    ok = EmitRelocated(single, tg);
++                    tg.jmp(s.code + s.length);
++                }
++                if (ok) {
++                    auto& pg = module->patch_gen;
++                    pg.reset();
++                    pg.setSize(s.code - pg.getCode());
++                    pg.jmp(tramp_ptr, Xbyak::CodeGenerator::LabelType::T_NEAR);
++                    pg.nop(s.length - (pg.getCurr() - s.code));
++                    module->patched.insert(s.code);
++                }
++            } catch (const Xbyak::Error& error) {
++                tg.setSize(tramp_offset);
++                LOG_ERROR(Core, "NBA: reciproco en {} sin parchear: {}", fmt::ptr(s.code),
++                          error.what());
++                ok = false;
++            }
++            ok ? patched++ : skipped++;
++            done[i] = true;
++            continue;
++        }
++        // Pareja: (primera, segunda) contiguas; el salto va al principio de la primera.
++        const Compact* cfirst = nullptr;
++        const Compact* csecond = nullptr;
++        size_t other = 0;
++        if (i + 1 < list.size()) {
++            const auto& n = list[i + 1];
++            if (n.code == s.code + s.length && (!n.flow || n.movable_flow) &&
++                !targets.contains(n.code) && !done[i + 1]) {
++                cfirst = &s, csecond = &n, other = i + 1;
++            }
++        }
++        if (cfirst == nullptr && i > 0) {
++            const auto& pv = list[i - 1];
++            if (pv.code + pv.length == s.code && !pv.flow && !targets.contains(s.code) &&
++                !done[i - 1] && !module->patched.contains(pv.code)) {
++                cfirst = &pv, csecond = &s, other = i - 1;
++            }
++        }
++        SweptInstruction sfirst{}, ssecond{};
++        if (cfirst == nullptr) {
++            const bool nf = i + 1 < list.size() && list[i + 1].flow;
++            const bool nt = i + 1 < list.size() && targets.contains(list[i + 1].code);
++            const bool pf = i > 0 && list[i - 1].flow;
++            const bool st = targets.contains(s.code);
++            RcpDebug("SIN PAREJA %p motivo %llu", s.code, (nf ? 1 : 0) | (nt ? 2 : 0) | (pf ? 4 : 0) |
++                                                          (st ? 8 : 0));
++        }
++        if (cfirst == nullptr || !decode(*cfirst, sfirst) || !decode(*csecond, ssecond)) {
++            skipped++;
++            done[i] = true;
++            continue;
++        }
++        const SweptInstruction* first = &sfirst;
++        const SweptInstruction* second = &ssecond;
++        const size_t tramp_offset = tg.getSize();
++        void* const tramp_ptr = const_cast<u8*>(tg.getCurr());
++        bool ok = false;
++        try {
++            ok = EmitRelocated(*first, tg) && EmitRelocated(*second, tg);
++            if (ok) {
++                tg.jmp(second->code + second->instruction.length);
++            }
++        } catch (const Xbyak::Error& error) {
++            tg.setSize(tramp_offset);
++            if (HandleTrampolineError(module, error)) {
++                break;
++            }
++            LOG_ERROR(Core, "NBA: reciproco en {} sin parchear: {}", fmt::ptr(s.code), error.what());
++            ok = false;
++        }
++        if (!ok) {
++            tg.setSize(tramp_offset);
++            skipped++;
++            done[i] = true;
++            continue;
++        }
++        auto& pg = module->patch_gen;
++        try {
++            pg.reset();
++            pg.setSize(first->code - pg.getCode());
++            pg.jmp(tramp_ptr, Xbyak::CodeGenerator::LabelType::T_NEAR);
++            const u64 total = first->instruction.length + second->instruction.length;
++            pg.nop(total - (pg.getCurr() - first->code));
++        } catch (const Xbyak::Error& error) {
++            LOG_ERROR(Core, "NBA: salto en {} no escrito: {}", fmt::ptr(first->code), error.what());
++            skipped++;
++            done[i] = true;
++            continue;
++        }
++        module->patched.insert(first->code);
++        done[i] = done[other] = true;
++        patched++;
++    }
++    LOG_INFO(Core, "NBA: reciprocos RCPPS/RSQRTPS parcheados por adelantado ({}): {} (sin parchear: {}, "
++                   "destinos de salto: {})",
++             ReciprocalExactMode() ? "exacto" : "amd", patched, skipped, targets.size());
++}
++#endif
++
+ void PrePatchInstructions(u64 segment_addr, u64 segment_size) {
++#if defined(_WIN32)
++    try {
++        PrePatchReciprocalsWindows(reinterpret_cast<u8*>(segment_addr), segment_size);
++    } catch (const std::exception& e) {
++        LOG_ERROR(Core, "NBA: parcheo de reciprocos abortado: {}", e.what());
++    } catch (...) {
++        LOG_ERROR(Core, "NBA: parcheo de reciprocos abortado (excepcion desconocida)");
++    }
++#endif
+ #if !defined(_WIN32) && !defined(__APPLE__)
+     // Linux and others have an FS segment pointing to valid memory, so continue to do full
+     // ahead-of-time patching for now until a better solution is worked out.
+diff --git a/src/core/devtools/layer.cpp b/src/core/devtools/layer.cpp
+index da64436f..13c67426 100644
+--- a/src/core/devtools/layer.cpp
++++ b/src/core/devtools/layer.cpp
+@@ -1,11 +1,15 @@
+ // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #include "layer.h"
+ 
+ #include <SDL3/SDL_events.h>
+ #include <imgui.h>
+ 
++#include <algorithm>
++#include <optional>
++
+ #include "SDL3/SDL_log.h"
+ #include "common/singleton.h"
+ #include "common/types.h"
+@@ -291,6 +295,8 @@ void L::DrawSimple() {
+     PopStyleColor();
+ }
+ 
++static std::optional<float> saved_pp_gamma;
++
+ static void LoadSettings(const char* line) {
+     int i;
+     float f;
+@@ -298,6 +304,10 @@ static void LoadSettings(const char* line) {
+         fps_scale = f;
+         return;
+     }
++    if (sscanf(line, "pp_gamma=%f", &f) == 1) {
++        saved_pp_gamma = std::clamp(f, 0.1f, 2.0f);
++        return;
++    }
+     if (sscanf(line, "show_advanced_debug=%d", &i) == 1) {
+         DebugState.IsShowingDebugMenuBar() = i != 0;
+         return;
+@@ -362,6 +372,9 @@ void L::SetupSettings() {
+     handler.WriteAllFn = [](ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf) {
+         buf->appendf("[%s][Data]\n", handler->TypeName);
+         buf->appendf("fps_scale=%f\n", fps_scale);
++        if (presenter) {
++            buf->appendf("pp_gamma=%f\n", presenter->GetPPSettingsRef().gamma);
++        }
+         buf->appendf("show_advanced_debug=%d\n", DebugState.IsShowingDebugMenuBar());
+         buf->appendf("show_frame_graph=%d\n", frame_graph.is_open);
+         buf->appendf("show_shader_list=%d\n", shader_list.open);
+@@ -394,6 +407,11 @@ void L::Draw() {
+     const auto io = GetIO();
+     PushID("DevtoolsLayer");
+ 
++    if (saved_pp_gamma && presenter) {
++        presenter->GetPPSettingsRef().gamma = *saved_pp_gamma;
++        saved_pp_gamma.reset();
++    }
++
+     if (!DebugState.IsGuestThreadsPaused()) {
+         const auto fn = DebugState.flip_frame_count.load();
+         frame_graph.AddFrame(fn, DebugState.FrameDeltaTime);
+diff --git a/src/core/libraries/app_content/app_content.cpp b/src/core/libraries/app_content/app_content.cpp
+index 72db82a4..9e050b9b 100644
+--- a/src/core/libraries/app_content/app_content.cpp
++++ b/src/core/libraries/app_content/app_content.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #include <cmath>
+ 
+@@ -455,8 +456,14 @@ int PS4_SYSV_ABI sceAppContentTemporaryDataGetAvailableSpaceKb(
+     return ORBIS_OK;
+ }
+ 
+-int PS4_SYSV_ABI sceAppContentTemporaryDataMount() {
+-    LOG_ERROR(Lib_AppContent, "(STUBBED) called");
++int PS4_SYSV_ABI sceAppContentTemporaryDataMount(OrbisAppContentMountPoint* mountPoint) {
++    if (mountPoint == nullptr) {
++        return ORBIS_APP_CONTENT_ERROR_PARAMETER;
++    }
++    static constexpr std::string_view TmpMount = "/temp0";
++    TmpMount.copy(mountPoint->data, TmpMount.size());
++    mountPoint->data[TmpMount.size()] = '\0';
++    LOG_INFO(Lib_AppContent, "sceAppContentTemporaryDataMount: mountPoint = {}", mountPoint->data);
+     return ORBIS_OK;
+ }
+ 
+diff --git a/src/core/libraries/app_content/app_content.h b/src/core/libraries/app_content/app_content.h
+index dd8455dc..4036a443 100644
+--- a/src/core/libraries/app_content/app_content.h
++++ b/src/core/libraries/app_content/app_content.h
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #pragma once
+ 
+@@ -108,7 +109,7 @@ int PS4_SYSV_ABI sceAppContentSmallSharedDataUnmount();
+ int PS4_SYSV_ABI sceAppContentTemporaryDataFormat();
+ int PS4_SYSV_ABI sceAppContentTemporaryDataGetAvailableSpaceKb(
+     const OrbisAppContentMountPoint* mountPoint, u64* availableSpaceKb);
+-int PS4_SYSV_ABI sceAppContentTemporaryDataMount();
++int PS4_SYSV_ABI sceAppContentTemporaryDataMount(OrbisAppContentMountPoint* mountPoint);
+ int PS4_SYSV_ABI sceAppContentTemporaryDataMount2(OrbisAppContentTemporaryDataOption option,
+                                                   OrbisAppContentMountPoint* mountPoint);
+ int PS4_SYSV_ABI sceAppContentTemporaryDataUnmount();
+diff --git a/src/core/libraries/kernel/sync/mutex.h b/src/core/libraries/kernel/sync/mutex.h
+index d26c984e..f22b606e 100644
+--- a/src/core/libraries/kernel/sync/mutex.h
++++ b/src/core/libraries/kernel/sync/mutex.h
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #pragma once
+ 
+@@ -53,7 +54,9 @@ public:
+         for (;;) {
+             const auto now = Clock::now();
+             if (abs_time <= now) {
+-                return false;
++                // Plazo vencido (o timeout 0): como std::timed_mutex, intentar al menos
++                // una vez sin bloquear en lugar de fallar sin mirar el mutex.
++                return try_lock();
+             }
+ 
+             const auto rel_ms = std::chrono::ceil<std::chrono::milliseconds>(abs_time - now);
+diff --git a/src/core/libraries/net/net.cpp b/src/core/libraries/net/net.cpp
+index a8023069..cc7b3085 100644
+--- a/src/core/libraries/net/net.cpp
++++ b/src/core/libraries/net/net.cpp
+@@ -42,6 +42,53 @@
+ 
+ namespace Libraries::Net {
+ 
++// NBA-DIAG: servidor de juego dedicado de la comunidad (ver tambien p2p_transport.cpp).
++// NBA_GSRV=ip:puerto=ip:puerto (virtual=real): el socket UDP de CommUDP del juego manda a la direccion
++// virtual que anuncia el servidor Blaze (con el puerto de juego de ConnApi); aqui se envia a la real y
++// lo que llega de la real se le presenta como de la virtual.
++struct GameServerRedirect {
++    sockaddr_in virt{};
++    sockaddr_in real{};
++};
++
++static const std::optional<GameServerRedirect>& GetGameServerRedirect() {
++    static const std::optional<GameServerRedirect> redirect = []() -> std::optional<GameServerRedirect> {
++        const char* v = std::getenv("NBA_GSRV");
++        if (v == nullptr) {
++            return std::nullopt;
++        }
++        const std::string text{v};
++        const auto eq = text.find('=');
++        const auto parse = [](const std::string& part, sockaddr_in* out) {
++            const auto colon = part.rfind(':');
++            if (colon == std::string::npos) {
++                return false;
++            }
++            out->sin_family = AF_INET;
++            out->sin_port = htons(static_cast<u16>(std::atoi(part.c_str() + colon + 1)));
++            return inet_pton(AF_INET, part.substr(0, colon).c_str(), &out->sin_addr) == 1;
++        };
++        GameServerRedirect r;
++        if (eq == std::string::npos || !parse(text.substr(0, eq), &r.virt) ||
++            !parse(text.substr(eq + 1), &r.real)) {
++            LOG_WARNING(Lib_Net, "NBA-GSRV: bad value {}", text);
++            return std::nullopt;
++        }
++        LOG_INFO(Lib_Net, "NBA-GSRV: {} -> {}", text.substr(0, eq), text.substr(eq + 1));
++        return r;
++    }();
++    return redirect;
++}
++
++static bool SameIPv4(const sockaddr_in& a, const sockaddr_storage& b) {
++    if (b.ss_family != AF_INET) {
++        return false;
++    }
++    const auto& in = reinterpret_cast<const sockaddr_in&>(b);
++    return in.sin_port == a.sin_port && in.sin_addr.s_addr == a.sin_addr.s_addr;
++}
++
++
+ namespace {
+ 
+ using Host::Error;
+@@ -541,6 +588,10 @@ static OrbisNetId sceNetAcceptImpl(OrbisNetId s, OrbisNetSockaddr* addr, u32* pa
+     socklen_t host_len = sizeof(host);
+     const auto r = Core::Net::SocketAccept(s, reinterpret_cast<sockaddr*>(&host), &host_len);
+     if (r.error == Error::Ok && addr != nullptr) {
++        if (const auto& redirect = GetGameServerRedirect(); redirect && SameIPv4(redirect->real, host)) {
++            std::memcpy(&host, &redirect->virt, sizeof(redirect->virt));
++            host_len = sizeof(redirect->virt);
++        }
+         ToOrbisSockaddr(reinterpret_cast<sockaddr*>(&host), host_len, addr, paddrlen);
+     }
+     return Return(r);
+@@ -1997,6 +2048,10 @@ static s32 sceNetRecvfromImpl(OrbisNetId s, void* buf, u64 len, s32 flags, Orbis
+         s, buf, static_cast<size_t>(len), msg.host, msg.dontwait,
+         addr ? reinterpret_cast<sockaddr*>(&host) : nullptr, addr ? &host_len : nullptr);
+     if (r.error == Error::Ok && addr != nullptr) {
++        if (const auto& redirect = GetGameServerRedirect(); redirect && SameIPv4(redirect->real, host)) {
++            std::memcpy(&host, &redirect->virt, sizeof(redirect->virt));
++            host_len = sizeof(redirect->virt);
++        }
+         ToOrbisSockaddr(reinterpret_cast<sockaddr*>(&host), host_len, addr, paddrlen);
+     }
+     return Return(r);
+@@ -2008,7 +2063,7 @@ s32 PS4_SYSV_ABI sceNetRecvfrom(OrbisNetId s, void* buf, u64 len, s32 flags, Orb
+     if (r > 0) {
+         CountTraffic(s, false, r);
+         if (addr != nullptr && paddrlen != nullptr) {
+-            NoteP2PPeer(s, false, addr, *paddrlen);
++            NoteP2PPeer(s, false, addr, *paddrlen, buf, static_cast<size_t>(r));
+         }
+     }
+     LOG_TRACE(Lib_Net, "s = {}, len = {}, flags = {:#x} -> {}{}", s, len, flags,
+@@ -2294,6 +2349,10 @@ static s32 sceNetSendtoImpl(OrbisNetId s, const void* buf, u64 len, s32 flags,
+         if (const int e = ToHostSockaddr(addr, addrlen, &host, &host_len); e != 0) {
+             return SetErrno(e);
+         }
++        if (const auto& redirect = GetGameServerRedirect(); redirect && SameIPv4(redirect->virt, host)) {
++            std::memcpy(&host, &redirect->real, sizeof(redirect->real));
++            host_len = sizeof(redirect->real);
++        }
+     }
+     return Return(Core::Net::SocketSendTo(s, buf, static_cast<size_t>(len), msg.host, msg.dontwait,
+                                           addr ? reinterpret_cast<sockaddr*>(&host) : nullptr,
+@@ -2305,7 +2364,7 @@ s32 PS4_SYSV_ABI sceNetSendto(OrbisNetId s, const void* buf, u64 len, s32 flags,
+     const s32 r = sceNetSendtoImpl(s, buf, len, flags, addr, addrlen);
+     if (r > 0) {
+         CountTraffic(s, true, r);
+-        NoteP2PPeer(s, true, addr, addrlen);
++        NoteP2PPeer(s, true, addr, addrlen, buf, static_cast<size_t>(r));
+     }
+     LOG_TRACE(Lib_Net, "s = {}, len = {}, flags = {:#x}, to = {} -> {}", s, len, flags,
+               addr != nullptr ? FormatSockaddr(addr, addrlen) : "connected peer",
+diff --git a/src/core/libraries/net/net_log.cpp b/src/core/libraries/net/net_log.cpp
+index 804ec4eb..fc1ffe7a 100644
+--- a/src/core/libraries/net/net_log.cpp
++++ b/src/core/libraries/net/net_log.cpp
+@@ -4,6 +4,9 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <map>
+ #include <mutex>
+@@ -248,7 +251,7 @@ struct Traffic {
+     u64 sent_calls = 0;
+     u64 received_bytes = 0;
+     u64 received_calls = 0;
+-    std::set<std::string> peers;
++    std::map<std::string, u32> peers; // peer -> datagrams seen
+ };
+ 
+ std::mutex g_traffic_mutex;
+@@ -268,26 +271,89 @@ void CountTraffic(OrbisNetId s, bool sent, s64 bytes) {
+     }
+ }
+ 
+-void NoteP2PPeer(OrbisNetId s, bool sent, const OrbisNetSockaddr* addr, u32 len) {
++// NBA-DIAG: with NBA_UDP_CAPTURE set, every datagram (whole, in hex) goes to nba_udp.txt in the
++// current folder, to study the game's own protocols (CommUDP, NetGameLink...). Stops after
++// 200000 datagrams.
++static void CaptureDatagram(OrbisNetId s, bool sent, const std::string& peer, const void* data,
++                            size_t size) {
++    static const bool enabled = std::getenv("NBA_UDP_CAPTURE") != nullptr;
++    if (!enabled || data == nullptr) {
++        return;
++    }
++    static std::mutex mutex;
++    static FILE* f = std::fopen("nba_udp.txt", "w");
++    static u32 count = 0;
++    static const auto start = std::chrono::steady_clock::now();
++    std::scoped_lock lock{mutex};
++    if (f == nullptr || count >= 200000) {
++        return;
++    }
++    ++count;
++    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++                        std::chrono::steady_clock::now() - start)
++                        .count();
++    std::fprintf(f, "%lld s%d %s %s %zu ", static_cast<long long>(ms), s, sent ? ">" : "<",
++                 peer.c_str(), size);
++    const auto* bytes = static_cast<const u8*>(data);
++    for (size_t i = 0; i < size; ++i) {
++        std::fprintf(f, "%02x", bytes[i]);
++    }
++    std::fputc('\n', f);
++    if (count % 64 == 0) {
++        std::fflush(f);
++    }
++}
++
++void NoteP2PPeer(OrbisNetId s, bool sent, const OrbisNetSockaddr* addr, u32 len, const void* data,
++                 size_t size) {
+     if (addr == nullptr || addr->sa_family != ORBIS_NET_AF_INET ||
+         len < sizeof(OrbisNetSockaddrIn)) {
+         return;
+     }
+     OrbisNetSockaddrIn in;
+     std::memcpy(&in, addr, sizeof(in));
+-    if (in.sin_vport == 0) {
+-        return; // not P2P
+-    }
++    // Plain UDP peers are logged too (vport 0): the first datagrams to/from each address (with
++    // their first bytes) show whether a game's peer-to-peer traffic flows and what it carries.
++    const bool p2p = in.sin_vport != 0;
+     constexpr size_t MaxPeers = 16;
++    constexpr u32 PacketsPerPeer = 4;
++    constexpr size_t DumpBytes = 64;
+     const std::string text = FormatSockaddr(addr, len);
++    u32 index = 0;
+     {
+         std::scoped_lock lock{g_traffic_mutex};
+         auto& peers = g_traffic[s].peers;
+-        if (peers.size() >= MaxPeers || !peers.insert((sent ? "> " : "< ") + text).second) {
+-            return;
++        const std::string key = (sent ? "> " : "< ") + text;
++        auto it = peers.find(key);
++        if (it == peers.end()) {
++            if (peers.size() >= MaxPeers) {
++                return;
++            }
++            it = peers.emplace(key, 0).first;
++        }
++        index = it->second++;
++    }
++    if (index >= PacketsPerPeer) {
++        CaptureDatagram(s, sent, text, data, size);
++        // Later on, one line per power of ten: shows whether the traffic keeps flowing.
++        u32 n = index + 1;
++        while (n % 10 == 0) {
++            n /= 10;
++        }
++        if (n == 1) {
++            LOG_INFO(Lib_Net, "socket {}: {} {} packets {} {}", s, p2p ? "P2P" : "UDP", index + 1,
++                     sent ? "to" : "from", text);
+         }
++        return;
++    }
++    CaptureDatagram(s, sent, text, data, size);
++    std::string hex;
++    const auto* bytes = static_cast<const u8*>(data);
++    for (size_t i = 0; bytes != nullptr && i < std::min(size, DumpBytes); ++i) {
++        hex += fmt::format("{:02x}", bytes[i]);
+     }
+-    LOG_INFO(Lib_Net, "socket {}: first P2P packet {} {}", s, sent ? "to" : "from", text);
++    LOG_INFO(Lib_Net, "socket {}: {} packet #{} {} {} ({} bytes): {}", s, p2p ? "P2P" : "UDP", index + 1,
++             sent ? "to" : "from", text, size, hex);
+ }
+ 
+ void LogSocketClosed(OrbisNetId s) {
+diff --git a/src/core/libraries/net/net_log.h b/src/core/libraries/net/net_log.h
+index a07a4dfd..fb435c29 100644
+--- a/src/core/libraries/net/net_log.h
++++ b/src/core/libraries/net/net_log.h
+@@ -20,7 +20,8 @@ std::string_view SocketTypeName(s32 type);
+ std::string OptionName(s32 level, s32 name);
+ std::string EpollEventsName(u32 events);
+ void CountTraffic(OrbisNetId s, bool sent, s64 bytes);
+-void NoteP2PPeer(OrbisNetId s, bool sent, const OrbisNetSockaddr* addr, u32 len);
++void NoteP2PPeer(OrbisNetId s, bool sent, const OrbisNetSockaddr* addr, u32 len, const void* data,
++                 size_t size);
+ void LogSocketClosed(OrbisNetId s);
+ 
+ } // namespace Libraries::Net
+diff --git a/src/core/libraries/net/net_resolver.cpp b/src/core/libraries/net/net_resolver.cpp
+index 4e0fb4d5..32ac23a5 100644
+--- a/src/core/libraries/net/net_resolver.cpp
++++ b/src/core/libraries/net/net_resolver.cpp
+@@ -19,6 +19,7 @@
+ #include "core/libraries/net/net_resolver.h"
+ #include "core/net/guest_net.h"
+ #include "core/net/host_net.h"
++#include "core/net/host_override.h"
+ 
+ #ifndef _WIN32
+ #include <netdb.h>
+@@ -72,6 +73,14 @@ s32 Lookup(std::string hostname, bool allow_literal, std::vector<u32>* addrs) {
+         addrs->push_back(htonl(INADDR_LOOPBACK));
+         return 0;
+     }
++    if (const auto ip = Core::Net::LookupHostOverride(hostname)) {
++        in_addr overridden{};
++        if (inet_pton(AF_INET, ip->c_str(), &overridden) == 1) {
++            LOG_INFO(Lib_Net, "lookup of {} overridden to {}", hostname, *ip);
++            addrs->push_back(overridden.s_addr);
++            return 0;
++        }
++    }
+     if (allow_literal) {
+         in_addr literal{};
+         if (inet_pton(AF_INET, hostname.c_str(), &literal) == 1) {
+diff --git a/src/core/libraries/net/net_util.cpp b/src/core/libraries/net/net_util.cpp
+index 24d3755d..5df4cf0c 100644
+--- a/src/core/libraries/net/net_util.cpp
++++ b/src/core/libraries/net/net_util.cpp
+@@ -31,6 +31,7 @@ typedef int net_socket;
+ #include <sstream>
+ #endif
+ 
++#include <cstdlib>
+ #include <map>
+ #include <memory>
+ #include <mutex>
+@@ -41,10 +42,29 @@ typedef int net_socket;
+ #include "core/libraries/error_codes.h"
+ #include "core/libraries/net/net_error.h"
+ #include "core/libraries/net/net_types.h"
++#include "core/net/host_override.h"
+ #include "net_util.h"
+ 
+ namespace NetUtil {
+ 
++// With a pinned console IP ("IP @consola" in hosts.txt) the last MAC byte becomes the last octet
++// of that IP. Two emulator instances on one PC would otherwise share the host's MAC, and games
++// that derive a machine id from it (DirtySock) ignore the other instance as if it were themselves.
++static void PinEthernetAddr(std::array<u8, 6>& mac) {
++    const auto pinned = Core::Net::LookupHostOverride("@consola");
++    if (!pinned) {
++        return;
++    }
++    const std::string ip{*pinned};
++    const auto dot = ip.find_last_of('.');
++    if (dot == std::string::npos) {
++        return;
++    }
++    mac[5] = static_cast<u8>(std::atoi(ip.c_str() + dot + 1));
++    LOG_INFO(Lib_Net, "MAC address adjusted for pinned console IP {}: last byte {:#04x}", ip,
++             mac[5]);
++}
++
+ const std::array<u8, 6>& NetUtilInternal::GetEthernetAddr() const {
+     return ether_address;
+ }
+@@ -64,6 +84,7 @@ bool NetUtilInternal::RetrieveEthernetAddr() {
+         size_infos) {
+         PIP_ADAPTER_INFO info = reinterpret_cast<PIP_ADAPTER_INFO>(adapter_infos.data());
+         memcpy(ether_address.data(), info[0].Address, 6);
++        PinEthernetAddr(ether_address);
+         return true;
+     }
+ #elif defined(__APPLE__)
+@@ -75,6 +96,7 @@ bool NetUtilInternal::RetrieveEthernetAddr() {
+             if (p->ifa_addr->sa_family == AF_LINK) {
+                 sockaddr_dl* sdp = reinterpret_cast<sockaddr_dl*>(p->ifa_addr);
+                 memcpy(ether_address.data(), sdp->sdl_data + sdp->sdl_nlen, 6);
++                PinEthernetAddr(ether_address);
+                 freeifaddrs(ifap);
+                 return true;
+             }
+@@ -117,6 +139,7 @@ bool NetUtilInternal::RetrieveEthernetAddr() {
+ 
+     if (success) {
+         memcpy(ether_address.data(), ifr.ifr_hwaddr.sa_data, 6);
++        PinEthernetAddr(ether_address);
+         return true;
+     }
+ #endif
+@@ -349,6 +372,14 @@ u32 NetUtilInternal::GetNatType() const {
+ bool NetUtilInternal::RetrieveIp() {
+     std::scoped_lock lock{m_mutex};
+ 
++    // "IP @consola" in hosts.txt pins the console address, e.g. to a VPN adapter so that
++    // peer-to-peer games advertise an address the other player can reach.
++    if (const auto pinned = Core::Net::LookupHostOverride("@consola")) {
++        ip = *pinned;
++        LOG_INFO(Lib_Net, "console IP pinned to {} (hosts.txt @consola)", ip);
++        return true;
++    }
++
+     auto sockfd = socket(AF_INET, SOCK_STREAM, 0);
+     if (sockfd == -1) {
+         return false;
+diff --git a/src/core/libraries/network/http.cpp b/src/core/libraries/network/http.cpp
+index a78e1ebe..129f50c5 100644
+--- a/src/core/libraries/network/http.cpp
++++ b/src/core/libraries/network/http.cpp
+@@ -31,6 +31,7 @@
+ #include "core/libraries/kernel/process.h"
+ #include "core/libraries/libs.h"
+ #include "core/libraries/network/http.h"
++#include "core/net/host_override.h"
+ #include "http_error.h"
+ 
+ #if __has_include(<httplib.h>)
+@@ -845,6 +846,11 @@ static s32 RunRealHttpRequest(const SendRequestPlan& plan_in, HttpResponse& out_
+             base_url += ":" + std::to_string(plan.port);
+         }
+         httplib::Client cli(base_url);
++        // Host/SNI stay the original name; only the connect address changes.
++        if (const auto ip = Core::Net::LookupHostOverride(plan.host)) {
++            LOG_INFO(Lib_Http, "{} overridden to {}", plan.host, *ip);
++            cli.set_hostname_addr_map({{plan.host, *ip}});
++        }
+         cli.set_connection_timeout(pick_timeout_seconds(plan.settings.connect_timeout_us, 30));
+         cli.set_read_timeout(pick_timeout_seconds(plan.settings.recv_timeout_us, 120));
+         cli.set_write_timeout(pick_timeout_seconds(plan.settings.send_timeout_us, 120));
+@@ -1692,6 +1698,18 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
+             return ORBIS_HTTP_ERROR_INVALID_ID;
+         }
+         auto& req = *it->second;
++        // Nonblocking requests: the app keeps calling SendRequest until it stops
++        // returning EAGAIN (response headers received), then reads the status.
++        if (req.settings.nonblock) {
++            if (req.state == HttpRequestState::Sending) {
++                return ORBIS_HTTP_ERROR_EAGAIN;
++            }
++            if (req.state == HttpRequestState::Sent) {
++                LOG_INFO(Lib_Http, "reqId={} nonblock send complete, errno={:#x}", reqId,
++                         static_cast<u32>(req.last_errno));
++                return req.last_errno != 0 ? req.last_errno : ORBIS_OK;
++            }
++        }
+         if (req.state == HttpRequestState::Sending || req.state == HttpRequestState::Sent) {
+             LOG_ERROR(Lib_Http, "Request already sent (reqId={})", reqId);
+             return ORBIS_HTTP_ERROR_AFTER_SEND;
+@@ -1759,6 +1777,7 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
+     }
+ 
+     const bool online = EmulatorSettings.IsConnectedToNetwork();
++    const bool nonblock = plan.settings.nonblock;
+     LOG_INFO(Lib_Http, "reqId={} dispatched to async worker [{} {} {}://{}:{}{}]", reqId,
+              online ? "ONLINE" : "OFFLINE", HttpMethodName(plan.method), plan.scheme, plan.host,
+              plan.port, plan.path);
+@@ -1824,7 +1843,7 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
+         }
+     }).detach();
+ 
+-    return ORBIS_OK;
++    return nonblock ? ORBIS_HTTP_ERROR_EAGAIN : ORBIS_OK;
+ }
+ 
+ int PS4_SYSV_ABI sceHttpSetAuthEnabled(int id, int isEnable) {
+@@ -1912,6 +1931,18 @@ int PS4_SYSV_ABI sceHttpSetRedirectCallback(int id, OrbisHttpRedirectCallback cb
+                                             void* userArg) {
+     LOG_ERROR(Lib_Http, "(STUBBED) called id={}, cbfunc={}, userArg={}", id,
+               fmt::ptr(reinterpret_cast<void*>(cbfunc)), fmt::ptr(userArg));
++    // The callback is not invoked. Apps that install one (e.g. DirtySDK's ProtoHttp)
++    // use it to veto libhttp's redirect handling and follow Location themselves, so
++    // hand them the 3xx response instead of following it here.
++    if (cbfunc) {
++        std::lock_guard<std::mutex> lock(g_state.m_mutex);
++        const char* level = "";
++        if (HttpSettings* s = ResolveSettings(id, level)) {
++            s->auto_redirect = false;
++            LOG_INFO(Lib_Http, "redirect callback set: auto_redirect=false at {} level (id={})",
++                     level, id);
++        }
++    }
+     return ORBIS_OK;
+ }
+ 
+@@ -1969,6 +2000,12 @@ int PS4_SYSV_ABI sceHttpsGetCaList(int httpCtxId, OrbisHttpsCaList* list) {
+ int PS4_SYSV_ABI sceHttpsGetSslError(int id, int* errNum, u32* detail) {
+     LOG_ERROR(Lib_Http, "(STUBBED) called id={}, errNum={}, detail={}", id, fmt::ptr(errNum),
+               fmt::ptr(detail));
++    if (errNum) {
++        *errNum = 0;
++    }
++    if (detail) {
++        *detail = 0;
++    }
+     return ORBIS_OK;
+ }
+ 
+diff --git a/src/core/libraries/videoout/video_out.cpp b/src/core/libraries/videoout/video_out.cpp
+index 1cf6d2a8..2cfbd7a7 100644
+--- a/src/core/libraries/videoout/video_out.cpp
++++ b/src/core/libraries/videoout/video_out.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #include "common/assert.h"
+ #include "common/elf_info.h"
+@@ -351,7 +352,12 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
+     Platform::IrqC::Instance()->RegisterOnce(
+         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
+             ASSERT_MSG(irq == Platform::InterruptId::GfxFlip, "An unexpected IRQ occured");
+-            ASSERT_MSG(port->buffer_labels[buf_id] == 1, "Out of order flip IRQ");
++            if (port->buffer_labels[buf_id] != 1) {
++                // With a high vblank frequency the EOP flip IRQ can arrive for a buffer that is no
++                // longer pending; ignore it like the hardware would instead of aborting.
++                LOG_WARNING(Lib_VideoOut, "Out of order flip IRQ for buffer {} ignored", buf_id);
++                return;
++            }
+             const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
+             ASSERT_MSG(result, "EOP flip submission failed");
+         });
+@@ -401,6 +407,7 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
+         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+     }
+ 
++    LOG_INFO(Lib_VideoOut, "handle = {}, gamma = {}", handle, settings->gamma);
+     presenter->GetPPSettingsRef().gamma = settings->gamma;
+     return ORBIS_OK;
+ }
+diff --git a/src/core/net/host_override.cpp b/src/core/net/host_override.cpp
+new file mode 100644
+index 00000000..edc8dd88
+--- /dev/null
++++ b/src/core/net/host_override.cpp
+@@ -0,0 +1,85 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <algorithm>
++#include <cctype>
++#include <fstream>
++#include <mutex>
++#include <sstream>
++#include <utility>
++#include <vector>
++
++#include "common/logging/log.h"
++#include "common/path_util.h"
++#include "core/net/host_override.h"
++
++namespace Core::Net {
++
++namespace {
++
++struct Entry {
++    std::string pattern; // lowercase; "*.foo" matches foo and its subdomains
++    std::string ip;
++};
++
++std::string ToLower(std::string_view s) {
++    std::string out(s);
++    std::transform(out.begin(), out.end(), out.begin(),
++                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
++    return out;
++}
++
++const std::vector<Entry>& Entries() {
++    static std::once_flag once;
++    static std::vector<Entry> entries;
++    std::call_once(once, [] {
++        const auto path = Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "hosts.txt";
++        std::ifstream file(path);
++        if (!file) {
++            return;
++        }
++        std::string line;
++        while (std::getline(file, line)) {
++            if (const auto hash = line.find('#'); hash != std::string::npos) {
++                line.resize(hash);
++            }
++            std::istringstream ss(line);
++            std::string ip, name;
++            if (!(ss >> ip)) {
++                continue;
++            }
++            while (ss >> name) {
++                entries.push_back({ToLower(name), ip});
++                LOG_INFO(Lib_Net, "host override: {} -> {}", name, ip);
++            }
++        }
++    });
++    return entries;
++}
++
++bool Matches(const std::string& pattern, const std::string& host) {
++    if (pattern.starts_with("*.")) {
++        const std::string_view base = std::string_view(pattern).substr(2);
++        return host == base ||
++               (host.size() > base.size() && host.ends_with(base) &&
++                host[host.size() - base.size() - 1] == '.');
++    }
++    return pattern == host;
++}
++
++} // namespace
++
++std::optional<std::string> LookupHostOverride(std::string_view hostname) {
++    std::string host = ToLower(hostname);
++    if (!host.empty() && host.back() == '.') {
++        host.pop_back();
++    }
++    for (const auto& e : Entries()) {
++        if (Matches(e.pattern, host)) {
++            return e.ip;
++        }
++    }
++    return std::nullopt;
++}
++
++} // namespace Core::Net
+diff --git a/src/core/net/host_override.h b/src/core/net/host_override.h
+new file mode 100644
+index 00000000..bdc57836
+--- /dev/null
++++ b/src/core/net/host_override.h
+@@ -0,0 +1,21 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// Per-emulator DNS overrides, read from <user dir>/hosts.txt. Lets games whose
++// official servers are gone be pointed at a replacement server without touching
++// the system hosts file. Format, one entry per line ('#' starts a comment):
++//   127.0.0.1  spring18.gosredirector.ea.com
++//   127.0.0.1  *.ea.com          (matches ea.com and any subdomain)
++
++#pragma once
++
++#include <optional>
++#include <string>
++#include <string_view>
++
++namespace Core::Net {
++
++// IPv4 address (dotted) the hostname is overridden to, if any.
++std::optional<std::string> LookupHostOverride(std::string_view hostname);
++
++} // namespace Core::Net
+diff --git a/src/core/net/p2p_transport.cpp b/src/core/net/p2p_transport.cpp
+index a8134dcb..df2e8be7 100644
+--- a/src/core/net/p2p_transport.cpp
++++ b/src/core/net/p2p_transport.cpp
+@@ -2,9 +2,14 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <cstring>
++#include <optional>
++#include <string>
+ #include <tuple>
++#include <utility>
+ 
++#include "common/logging/log.h"
+ #include "core/net/p2p_transport.h"
+ 
+ #ifndef _WIN32
+@@ -74,6 +79,44 @@ Endpoint Endpoint::FromSockaddr(const sockaddr* sa, socklen_t len) {
+     return e;
+ }
+ 
++namespace {
++
++// NBA-DIAG: servidor de juego dedicado de la comunidad. NBA_GSRV=ip:puerto=ip:puerto (virtual=real):
++// lo que el juego manda a la direccion virtual (la que anuncia el servidor Blaze, con el puerto de
++// juego de ConnApi) sale hacia la real, y lo que llega de la real se le presenta como de la virtual.
++// Sin esto, con el servidor en la IP de un jugador, ConnApi acaba hablando con el juego de ese PC.
++std::optional<std::pair<Endpoint, Endpoint>> GameServerRedirect() {
++    static const auto redirect = []() -> std::optional<std::pair<Endpoint, Endpoint>> {
++        const char* v = std::getenv("NBA_GSRV");
++        if (v == nullptr) {
++            return std::nullopt;
++        }
++        const std::string text{v};
++        const auto eq = text.find('=');
++        const auto parse = [](const std::string& part) -> std::optional<Endpoint> {
++            const auto colon = part.rfind(':');
++            if (colon == std::string::npos) {
++                return std::nullopt;
++            }
++            const std::string ip = part.substr(0, colon);
++            return Endpoint::IPv4(ip.c_str(), static_cast<u16>(std::atoi(part.c_str() + colon + 1)));
++        };
++        if (eq == std::string::npos) {
++            return std::nullopt;
++        }
++        const auto virt = parse(text.substr(0, eq));
++        const auto real = parse(text.substr(eq + 1));
++        if (!virt || !real) {
++            return std::nullopt;
++        }
++        LOG_INFO(Lib_Net, "NBA-GSRV: {} -> {}", text.substr(0, eq), text.substr(eq + 1));
++        return std::make_pair(*virt, *real);
++    }();
++    return redirect;
++}
++
++} // namespace
++
+ Endpoint Endpoint::IPv4(const char* dotted, u16 port) {
+     Endpoint e;
+     auto* in = reinterpret_cast<sockaddr_in*>(&e.addr);
+@@ -222,8 +265,11 @@ void Transport::ThreadMain() {
+             if (r.error != Error::Ok) {
+                 break;
+             }
+-            HandlePacket({receive_buffer_.data(), static_cast<size_t>(r.value)},
+-                         Endpoint::FromSockaddr(reinterpret_cast<sockaddr*>(&from), from_len), now);
++            Endpoint source = Endpoint::FromSockaddr(reinterpret_cast<sockaddr*>(&from), from_len);
++            if (const auto redirect = GameServerRedirect(); redirect && source == redirect->second) {
++                source = redirect->first;
++            }
++            HandlePacket({receive_buffer_.data(), static_cast<size_t>(r.value)}, source, now);
+         }
+         RunTimers(now);
+     }
+@@ -270,8 +316,23 @@ Error Transport::SendPacket(std::span<const u8> packet, const Endpoint& to) {
+             return Error::Ok;
+         }
+     }
++    const Endpoint* dest = &to;
++    static bool announced = false;
++    if (!announced) {
++        announced = true;
++        const char* v = std::getenv("NBA_GSRV");
++        LOG_INFO(Lib_Net, "NBA-GSRV: first P2P send, NBA_GSRV={}", v ? v : "(unset)");
++    }
++    const auto redirect = GameServerRedirect();
++    if (redirect && to == redirect->first) {
++        dest = &redirect->second;
++        static int logged = 0;
++        if (logged++ < 4) {
++            LOG_INFO(Lib_Net, "NBA-GSRV: {} bytes redirected to the game server", packet.size());
++        }
++    }
+     const auto r =
+-        Host::SendTo(socket_, packet.data(), packet.size(), 0, to.Sockaddr(), to.Length());
++        Host::SendTo(socket_, packet.data(), packet.size(), 0, dest->Sockaddr(), dest->Length());
+     return r.error;
+ }
+ 
+diff --git a/src/core/signals.cpp b/src/core/signals.cpp
+index dcfd50a3..c14c3786 100644
+--- a/src/core/signals.cpp
++++ b/src/core/signals.cpp
+@@ -1,6 +1,15 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+-
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
++
++#include <algorithm>
++#include <array>
++#include <cstdlib>
++#include <mutex>
++#include <string>
++#include <string_view>
++#include <unordered_map>
++#include <vector>
+ #include <fmt/format.h>
+ #include "common/arch.h"
+ #include "common/assert.h"
+@@ -14,7 +23,9 @@
+ #include "emulator.h"
+ 
+ #ifdef _WIN32
++#include <thread>
+ #include <windows.h>
++#include <tlhelp32.h>
+ static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
+ #else
+ #include <csignal>
+@@ -28,6 +39,232 @@ namespace Core {
+ 
+ #if defined(_WIN32)
+ 
++// NBA-DIAG: anillo de la traza (modo NBA_PROBE_TRACE). Se vuelca con un acierto en DR1 y
++// tambien al morir el juego por una excepcion no manejada.
++struct NbaTraceEntry {
++    int kind; // 0 nativa (adaptador, nombre), 1 booleano devuelto, 2 mensaje de log, 3 marca
++    u64 a, b, c, d, e, f, g, h; // h: primer qword en [rdi] (vtable si rdi es un objeto)
++    u64 r28, r30, r78, r178;    // qwords en [rdi+0x28], [rdi+0x30], [rdi+0x78], [rdi+0x178]
++};
++static std::mutex g_nba_ring_mutex;
++static std::array<NbaTraceEntry, 65536> g_nba_ring{};
++static size_t g_nba_ring_pos = 0;
++// Traza automatica (StartNbaAutoTrace): marcas en DR0/DR1/DR3 (direcciones del volcado)
++static bool g_nba_auto_marks = false;
++static u64 g_nba_dump_delta = 0; // direccion en ejecucion - direccion del volcado
++
++// Lee una cadena solo si la pagina es legible (los argumentos pueden no ser punteros)
++static std::string NbaTraceText(u64 p) {
++    MEMORY_BASIC_INFORMATION mbi{};
++    if (p < 0x10000 || VirtualQuery(reinterpret_cast<void*>(p), &mbi, sizeof(mbi)) == 0 ||
++        mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
++        return {};
++    }
++    const auto* s = reinterpret_cast<const char*>(p);
++    const auto end = reinterpret_cast<const char*>(mbi.BaseAddress) + mbi.RegionSize;
++    std::string out;
++    for (; s < end && *s != 0 && out.size() < 160; ++s) {
++        if (*s < 0x20 || *s > 0x7e) {
++            return {};
++        }
++        out += *s;
++    }
++    return out;
++}
++
++// Primer qword en addr si la memoria es legible (0 si no): con rdi = objeto, su vtable.
++// NBA_MARK_OFFS=a,b,c,d (hex): desplazamientos desde rdi que leen las marcas (por defecto 28,30,78,178).
++static std::array<u64, 4> g_nba_mark_offs{0x28, 0x30, 0x78, 0x178};
++
++static u64 NbaReadQword(u64 addr) {
++    MEMORY_BASIC_INFORMATION mbi{};
++    if (addr < 0x10000 || VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0 ||
++        mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
++        return 0;
++    }
++    return *reinterpret_cast<const u64*>(addr);
++}
++
++// Llamar con g_nba_ring_mutex tomado.
++static void DumpNbaTrace() {
++    const size_t n = std::min(g_nba_ring_pos, g_nba_ring.size());
++    for (size_t i = g_nba_ring_pos - n; i < g_nba_ring_pos; i++) {
++        const NbaTraceEntry& e = g_nba_ring[i % g_nba_ring.size()];
++        // Las marcas se vuelcan todas; del resto, solo las ultimas 3000 entradas
++        if (e.kind != 3 && g_nba_ring_pos - i > 3000) {
++            continue;
++        }
++        if (e.kind == 0) {
++            LOG_INFO(Debug, "NBA-TRACE {} {}.{}", i, NbaTraceText(e.a), NbaTraceText(e.b));
++        } else if (e.kind == 1) {
++            LOG_INFO(Debug, "NBA-TRACE {}     -> {:#x}", i, e.a);
++        } else if (e.kind == 3) {
++            LOG_INFO(Debug, "NBA-TRACE {} MARK {:#x} rdi={:#x} rsi={:#x} rax={:#x} rbx={:#x} rcx={:#x} [rdi]={:#x} thread={}", i,
++                     e.a - g_nba_dump_delta, e.b, e.c, e.e, e.f, e.g, e.h, e.d);
++        } else {
++            LOG_INFO(Debug, "NBA-TRACE {} LOG \"{}\" args: {:#x} [{}] {:#x} [{}] {:#x} [{}]", i,
++                     NbaTraceText(e.a), e.b, NbaTraceText(e.b), e.c, NbaTraceText(e.c), e.d,
++                     NbaTraceText(e.d));
++        }
++    }
++}
++
++// Igual que DumpNbaTrace, pero escrito directamente en nba_crash.txt (carpeta actual): el
++// log normal puede perder sus ultimas lineas si el proceso muere antes de vaciarlo.
++// Llamar con g_nba_ring_mutex tomado.
++static void DumpNbaTraceFile(const CONTEXT* c) {
++    FILE* f = std::fopen("nba_crash.txt", "w");
++    if (f == nullptr) {
++        return;
++    }
++    std::fprintf(f, "NBA-CRASH thread=%lu rip=%#llx (volcado %#llx) rax=%#llx rbx=%#llx rdi=%#llx\n",
++                 GetCurrentThreadId(), c->Rip, c->Rip - g_nba_dump_delta, c->Rax, c->Rbx, c->Rdi);
++    const size_t n = std::min(g_nba_ring_pos, g_nba_ring.size());
++    for (size_t i = g_nba_ring_pos - n; i < g_nba_ring_pos; i++) {
++        const NbaTraceEntry& e = g_nba_ring[i % g_nba_ring.size()];
++        if (e.kind == 3) {
++            std::fprintf(f,
++                         "%zu MARK %#llx rdi=%#llx rsi=%#llx rax=%#llx rbx=%#llx rcx=%#llx [rdi]=%#llx "
++                         "o0=%#llx o1=%#llx o2=%#llx o3=%#llx thread=%llu\n",
++                         i, e.a - g_nba_dump_delta, e.b, e.c, e.e, e.f, e.g, e.h, e.r28, e.r30, e.r78,
++                         e.r178, e.d);
++        } else if (e.kind == 2 && g_nba_ring_pos - i <= 3000) {
++            std::fprintf(f, "%zu LOG \"%s\" %#llx [%s] %#llx [%s] %#llx [%s]\n", i,
++                         NbaTraceText(e.a).c_str(), e.b, NbaTraceText(e.b).c_str(), e.c,
++                         NbaTraceText(e.c).c_str(), e.d, NbaTraceText(e.d).c_str());
++        }
++    }
++    std::fclose(f);
++}
++
++// NBA-DIAG: sondas con breakpoints de hardware puestos desde fuera (tools/probe.py).
++// DR0-DR2 son sondas de entrada; DR3 se usa automaticamente para capturar el retorno
++// de la ultima funcion sondeada (registra RAX). Siempre se reanuda con RF=1.
++static bool HandleNbaProbe(EXCEPTION_POINTERS* pExp) {
++    CONTEXT* ctx = pExp->ContextRecord;
++    const u64 dr6 = ctx->Dr6;
++    if ((dr6 & 0xF) == 0) {
++        return false;
++    }
++    static std::mutex probe_mutex;
++    static std::unordered_map<u64, u64> probe_hits;
++    const u64 rip = ctx->Rip;
++    // Modo traza (env NBA_PROBE_TRACE=1): DR0 graba en silencio (rcx, r8) de cada acierto en
++    // un anillo; DR2 graba el valor de RDI (p. ej. la rutina comun que devuelve un booleano al
++    // script); un acierto en DR1 vuelca el anillo. Sirve para ver que funciones nativas
++    // (adaptador, nombre) llamo el script de la interfaz, y que devolvieron, antes de un evento.
++    // Con NBA_PROBE_DR2=fmt, DR2 se pone en una funcion de log variadica (this, nivel, formato, a,
++    // b, c) y se graba el formato y los tres primeros argumentos.
++    static const bool trace_mode = std::getenv("NBA_PROBE_TRACE") != nullptr;
++    static const bool dr2_fmt = [] {
++        const char* v = std::getenv("NBA_PROBE_DR2");
++        return v != nullptr && std::string_view{v} == "fmt";
++    }();
++    if (trace_mode && g_nba_auto_marks && (dr6 & 0xB)) {
++        // Traza automatica: DR0, DR1 y DR3 son marcas (entrada a una funcion concreta)
++        const bool mark = ((dr6 & 0x1) && rip == ctx->Dr0) || ((dr6 & 0x2) && rip == ctx->Dr1) ||
++                          ((dr6 & 0x8) && rip == ctx->Dr3);
++        if (mark) {
++            // NBA_MARK_ALT=1: en vez de rax/rbx/rcx se guardan [rsp] (direccion de retorno), [rsi] y rdx
++            static const bool alt = std::getenv("NBA_MARK_ALT") != nullptr;
++            std::scoped_lock lk{g_nba_ring_mutex};
++            g_nba_ring[g_nba_ring_pos++ % g_nba_ring.size()] = {3, rip, ctx->Rdi, ctx->Rsi,
++                                                                 GetCurrentThreadId(),
++                                                                 alt ? NbaReadQword(ctx->Rsp) : ctx->Rax,
++                                                                 alt ? NbaReadQword(ctx->Rsi) : ctx->Rbx,
++                                                                 alt ? ctx->Rdx : ctx->Rcx,
++                                                                 NbaReadQword(ctx->Rdi), NbaReadQword(ctx->Rdi + g_nba_mark_offs[0]),
++                                                                 NbaReadQword(ctx->Rdi + g_nba_mark_offs[1]), NbaReadQword(ctx->Rdi + g_nba_mark_offs[2]),
++                                                                 NbaReadQword(ctx->Rdi + g_nba_mark_offs[3])};
++            ctx->Dr6 = 0;
++            ctx->EFlags |= 0x10000;
++            return true;
++        }
++    }
++    if (trace_mode && (dr6 & 0x7) && !(dr6 & 0x8)) {
++        std::scoped_lock lk{g_nba_ring_mutex};
++        auto& ring = g_nba_ring;
++        if ((dr6 & 0x1) && rip == ctx->Dr0) {
++            ring[g_nba_ring_pos++ % ring.size()] = {0, ctx->Rcx, ctx->R8, 0, 0};
++            ctx->Dr6 = 0;
++            ctx->EFlags |= 0x10000;
++            return true;
++        }
++        if ((dr6 & 0x4) && rip == ctx->Dr2) {
++            ring[g_nba_ring_pos++ % ring.size()] =
++                dr2_fmt ? NbaTraceEntry{2, ctx->Rdx, ctx->Rcx, ctx->R8, ctx->R9}
++                        : NbaTraceEntry{1, ctx->Rdi, 0, 0, 0};
++            ctx->Dr6 = 0;
++            ctx->EFlags |= 0x10000;
++            return true;
++        }
++        if ((dr6 & 0x2) && rip == ctx->Dr1) {
++            DumpNbaTrace();
++        }
++    }
++    u64 hits;
++    {
++        std::scoped_lock lk{probe_mutex};
++        hits = ++probe_hits[rip];
++    }
++    const bool verbose = hits <= 30 || (hits % 500) == 0;
++    if (dr6 & 0x8) {
++        // Retorno capturado: desactivar DR3
++        if (verbose) {
++            LOG_INFO(Debug, "NBA-PROBE ret at={:#x} rax={:#x} hits={}", rip, ctx->Rax, hits);
++        }
++        ctx->Dr7 &= ~((u64)0x3 << 6);
++        ctx->Dr7 &= ~((u64)0xF << 28);
++        ctx->Dr3 = 0;
++    } else {
++        if (verbose) {
++            const u64* sp = reinterpret_cast<const u64*>(ctx->Rsp);
++            std::string chain;
++            u64 rbp = ctx->Rbp;
++            for (int i = 0; i < 6; i++) {
++                if (rbp < ctx->Rsp || rbp > ctx->Rsp + 0x100000 || (rbp & 7)) {
++                    break;
++                }
++                const u64* fp = reinterpret_cast<const u64*>(rbp);
++                chain += fmt::format(" {:#x}", fp[1]);
++                rbp = fp[0];
++            }
++            // 32 bytes at rbx and at rdi (when readable): the structure a loop is walking, or
++            // the object a method was called on
++            const auto dump = [](u64 addr) {
++                std::string mem;
++                MEMORY_BASIC_INFORMATION mbi{};
++                if (addr >= 0x10000 &&
++                    VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) != 0 &&
++                    mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0 &&
++                    addr + 32 <= reinterpret_cast<u64>(mbi.BaseAddress) + mbi.RegionSize) {
++                    const auto* p = reinterpret_cast<const u8*>(addr);
++                    for (int i = 0; i < 32; i++) {
++                        mem += fmt::format("{:02x}", p[i]);
++                    }
++                }
++                return mem;
++            };
++            LOG_INFO(Debug,
++                     "NBA-PROBE hit at={:#x} hits={} rdi={:#x} rsi={:#x} rdx={:#x} rcx={:#x} "
++                     "rax={:#x} rbx={:#x} r8={:#x} r9={:#x} r12={:#x} r13={:#x} r14={:#x} "
++                     "r15={:#x} [rbx]={} [rdi]={} ret={:#x} chain:{}",
++                     rip, hits, ctx->Rdi, ctx->Rsi, ctx->Rdx, ctx->Rcx, ctx->Rax, ctx->Rbx,
++                     ctx->R8, ctx->R9, ctx->R12, ctx->R13, ctx->R14, ctx->R15, dump(ctx->Rbx),
++                     dump(ctx->Rdi), sp[0], chain);
++        }
++        // Armar DR3 sobre la direccion de retorno (ejecucion, 1 byte)
++        if ((ctx->Dr7 & ((u64)0x3 << 6)) == 0) {
++            ctx->Dr3 = *reinterpret_cast<const u64*>(ctx->Rsp);
++            ctx->Dr7 &= ~((u64)0xF << 28);
++            ctx->Dr7 |= ((u64)0x1 << 6);
++        }
++    }
++    ctx->Dr6 = 0;
++    ctx->EFlags |= 0x10000; // RF
++    return true;
++}
++
+ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
+     using namespace Libraries::Kernel;
+     const auto* signals = Signals::Instance();
+@@ -112,8 +349,12 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
+         guest_info._si_signo = POSIX_SIGILL;
+         guest_info._si_code = POSIX_ILL_BADSTK; // i am not sure about this one either
+         break;
+-    case EXCEPTION_BREAKPOINT:
+     case EXCEPTION_SINGLE_STEP:
++        if (HandleNbaProbe(pExp)) {
++            return EXCEPTION_CONTINUE_EXECUTION;
++        }
++        [[fallthrough]];
++    case EXCEPTION_BREAKPOINT:
+         guest_info._si_signo = POSIX_SIGTRAP;
+         guest_info._si_code = POSIX_TRAP_BRKPT;
+         break;
+@@ -124,6 +365,10 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
+     case MS_VC_EXCEPTION:
+         LOG_DEBUG(Debug, "Pass MS_VC_EXCEPTION at {} to handler", address);
+         return EXCEPTION_EXECUTE_HANDLER;
++    case 0xE06D7363:
++        // Excepcion C++ (throw) del propio emulador: que la trate su catch. El manejador vectorizado
++        // la ve antes que nadie y antes acababa cerrando el emulador aunque estuviera capturada.
++        return EXCEPTION_CONTINUE_SEARCH;
+     default:
+         break;
+     }
+@@ -143,14 +388,169 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
+         use_static_windows_guest_red_zone_protection ? static_protection_exception : true;
+     if (report_unhandled) {
+         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
++        // NBA-DIAG: con la traza activa, volcar lo que el juego registro antes de morir
++        if (std::getenv("NBA_PROBE_TRACE") != nullptr) {
++            const CONTEXT* c = pExp->ContextRecord;
++            const u64* sp = reinterpret_cast<const u64*>(c->Rsp);
++            LOG_CRITICAL(Debug,
++                         "NBA-CRASH thread={} rip={:#x} (volcado {:#x}) rax={:#x} rbx={:#x} "
++                         "rcx={:#x} rdx={:#x} rdi={:#x} rsi={:#x} r12={:#x} r13={:#x} r14={:#x} "
++                         "r15={:#x} [rsp]={:#x} [rsp+8]={:#x}",
++                         GetCurrentThreadId(), c->Rip, c->Rip - g_nba_dump_delta, c->Rax, c->Rbx,
++                         c->Rcx, c->Rdx, c->Rdi, c->Rsi, c->R12, c->R13, c->R14, c->R15, sp[0],
++                         sp[1]);
++        }
++        if (std::getenv("NBA_PROBE_TRACE") != nullptr && g_nba_ring_mutex.try_lock()) {
++            DumpNbaTraceFile(pExp->ContextRecord);
++            DumpNbaTrace();
++            g_nba_ring_mutex.unlock();
++        }
+         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
+     }
+ 
+     return EXCEPTION_CONTINUE_SEARCH;
+ }
+ 
++// Copia continua del log del juego y las marcas a nba_trace.txt (carpeta actual), para ver lo que
++// hace el juego aunque no se caiga. Cada formato se escribe como mucho 300 veces (hay mensajes que
++// se repiten en cada fotograma).
++static void FlushNbaTraceFile() {
++    static size_t done = 0;
++    static std::unordered_map<u64, u32> seen;
++    static FILE* f = std::fopen("nba_trace.txt", "w");
++    if (f == nullptr) {
++        return;
++    }
++    std::vector<std::pair<size_t, NbaTraceEntry>> news;
++    {
++        std::scoped_lock lk{g_nba_ring_mutex};
++        if (g_nba_ring_pos - done > g_nba_ring.size()) {
++            done = g_nba_ring_pos - g_nba_ring.size();
++        }
++        for (; done < g_nba_ring_pos; ++done) {
++            const NbaTraceEntry& e = g_nba_ring[done % g_nba_ring.size()];
++            if ((e.kind == 3 || e.kind == 2) && seen[e.a]++ < 300) {
++                news.emplace_back(done, e);
++            }
++        }
++    }
++    const SYSTEMTIME now = [] {
++        SYSTEMTIME t;
++        GetLocalTime(&t);
++        return t;
++    }();
++    for (const auto& [i, e] : news) {
++        if (e.kind == 3) {
++            std::fprintf(f, "%02d:%02d:%02d %zu MARK %#llx rdi=%#llx rsi=%#llx rax=%#llx rbx=%#llx "
++                            "rcx=%#llx [rdi]=%#llx o0=%#llx o1=%#llx o2=%#llx o3=%#llx thread=%llu\n",
++                         now.wHour, now.wMinute, now.wSecond, i, e.a - g_nba_dump_delta, e.b, e.c,
++                         e.e, e.f, e.g, e.h, e.r28, e.r30, e.r78, e.r178, e.d);
++        } else {
++            std::fprintf(f, "%02d:%02d:%02d %zu LOG \"%s\" %#llx [%s] %#llx [%s] %#llx [%s]\n",
++                         now.wHour, now.wMinute, now.wSecond, i, NbaTraceText(e.a).c_str(), e.b,
++                         NbaTraceText(e.b).c_str(), e.c, NbaTraceText(e.c).c_str(), e.d,
++                         NbaTraceText(e.d).c_str());
++        }
++    }
++    std::fflush(f);
++}
++
++void StartNbaAutoTrace(u64 eboot_base) {
++    const char* fn = std::getenv("NBA_TRACE_LOGFN");
++    if (fn == nullptr || std::getenv("NBA_PROBE_TRACE") == nullptr) {
++        return;
++    }
++    // Addresses come from the eboot dump, which was taken with the eboot at 0xB4D0000.
++    constexpr u64 DumpBase = 0xB4D0000;
++    g_nba_dump_delta = eboot_base - DumpBase;
++    const u64 target = std::strtoull(fn, nullptr, 16) + g_nba_dump_delta;
++    LOG_INFO(Debug, "NBA-TRACE: auto trace on log function {:#x}", target);
++    if (const char* o = std::getenv("NBA_MARK_OFFS")) {
++        char* p = const_cast<char*>(o);
++        for (auto& off : g_nba_mark_offs) {
++            off = std::strtoull(p, &p, 16);
++            if (*p != ',') {
++                break;
++            }
++            ++p;
++        }
++    }
++    // NBA_TRACE_MARKS=a,b,c: up to three functions whose entry is recorded in the ring (DR0, DR1,
++    // DR3), to see the order of events next to the game's log.
++    std::array<u64, 3> marks{};
++    if (const char* m = std::getenv("NBA_TRACE_MARKS")) {
++        char* p = const_cast<char*>(m);
++        for (auto& mark : marks) {
++            const u64 v = std::strtoull(p, &p, 16);
++            if (v == 0) {
++                break;
++            }
++            mark = v + g_nba_dump_delta;
++            LOG_INFO(Debug, "NBA-TRACE: mark on {:#x}", mark);
++            if (*p != ',') {
++                break;
++            }
++            ++p;
++        }
++        g_nba_auto_marks = marks[0] != 0;
++    }
++    std::thread([target, marks] {
++        const DWORD self = GetCurrentThreadId();
++        const DWORD pid = GetCurrentProcessId();
++        while (true) {
++            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
++            THREADENTRY32 te{};
++            te.dwSize = sizeof(te);
++            for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
++                if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) {
++                    continue;
++                }
++                HANDLE h = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
++                                          THREAD_SUSPEND_RESUME,
++                                      FALSE, te.th32ThreadID);
++                if (h == nullptr) {
++                    continue;
++                }
++                // No logging while a thread is suspended: it could be holding the log lock.
++                if (SuspendThread(h) != static_cast<DWORD>(-1)) {
++                    CONTEXT c{};
++                    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
++                    if (GetThreadContext(h, &c) && (c.Dr2 != target || c.Dr0 != marks[0] ||
++                                                     c.Dr1 != marks[1] || c.Dr3 != marks[2])) {
++                        // Execute breakpoints (RW=00, LEN=00); DR2 = log, DR0/DR1/DR3 = marks
++                        c.Dr0 = marks[0];
++                        c.Dr1 = marks[1];
++                        c.Dr2 = target;
++                        c.Dr3 = marks[2];
++                        u64 dr7 = c.Dr7 & ~u64{0xFFFF00FF};
++                        dr7 |= u64{1} << 4;
++                        if (marks[0] != 0) {
++                            dr7 |= u64{1} << 0;
++                        }
++                        if (marks[1] != 0) {
++                            dr7 |= u64{1} << 2;
++                        }
++                        if (marks[2] != 0) {
++                            dr7 |= u64{1} << 6;
++                        }
++                        c.Dr7 = dr7;
++                        SetThreadContext(h, &c);
++                    }
++                    ResumeThread(h);
++                }
++                CloseHandle(h);
++            }
++            CloseHandle(snap);
++            FlushNbaTraceFile();
++            Sleep(2000);
++        }
++    }).detach();
++}
++
+ #else
+ 
++void StartNbaAutoTrace(u64) {}
++
+ static std::string DisassembleInstruction(void* code_address) {
+     char buffer[256] = "<unable to decode>";
+ 
+diff --git a/src/core/signals.h b/src/core/signals.h
+index 932ee9e7..496101a5 100644
+--- a/src/core/signals.h
++++ b/src/core/signals.h
+@@ -22,6 +22,11 @@ using IllegalInstructionHandler = bool (*)(void* context);
+ void SignalHandler(int sig, siginfo_t* info, void* raw_context);
+ #endif
+ 
++/// NBA-DIAG: with NBA_PROBE_TRACE=1, NBA_PROBE_DR2=fmt and NBA_TRACE_LOGFN=<address in the
++/// eboot dump>, keeps a hardware breakpoint on the game's log function in every thread (also
++/// threads created later), so the traced log is dumped when the game crashes. Windows only.
++void StartNbaAutoTrace(u64 eboot_base);
++
+ /// Receives OS signals and dispatches to the appropriate handlers.
+ class SignalDispatch {
+ public:
+diff --git a/src/emulator.cpp b/src/emulator.cpp
+index 76b6145b..90b07442 100644
+--- a/src/emulator.cpp
++++ b/src/emulator.cpp
+@@ -43,6 +43,7 @@
+ #include "core/libraries/save_data/save_backup.h"
+ #include "core/linker.h"
+ #include "core/memory.h"
++#include "core/signals.h"
+ #include "core/user_settings.h"
+ #include "emulator.h"
+ #include "video_core/cache_storage.h"
+@@ -681,6 +682,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
+         LOG_CRITICAL(Loader, "Failed to load game's eboot.bin: {}", guest_eboot_path);
+         std::quick_exit(0);
+     }
++    Core::StartNbaAutoTrace(linker->GetModule(0)->GetBaseAddress());
+ 
+ #ifdef ENABLE_DISCORD_RPC
+     // Discord RPC
+diff --git a/src/shader_recompiler/backend/spirv/emit_spirv_atomic.cpp b/src/shader_recompiler/backend/spirv/emit_spirv_atomic.cpp
+index a7db8e20..913749ec 100644
+--- a/src/shader_recompiler/backend/spirv/emit_spirv_atomic.cpp
++++ b/src/shader_recompiler/backend/spirv/emit_spirv_atomic.cpp
+@@ -1,7 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
++#include "shader_recompiler/backend/spirv/emit_spirv_shared_memory_bounds.h"
+ #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+ 
+ namespace Shader::Backend::SPIRV {
+@@ -20,36 +22,56 @@ Id SharedAtomicU32(EmitContext& ctx, Id offset, Id value,
+                    Id (Sirit::Module::*atomic_func)(Id, Id, Id, Id, Id)) {
+     const Id shift_id{ctx.ConstU32(2U)};
+     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
+-    const Id pointer{ctx.EmitSharedMemoryAccess(ctx.shared_u32, ctx.shared_memory_u32, index)};
+-    const auto [scope, semantics]{AtomicArgs(ctx)};
+-    return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics, value);
++    return EmitCheckedSharedResult(
++        ctx, offset, SharedMemoryLimit(ctx), 4u, ctx.U32[1],
++        ctx.u32_zero_value, [&] {
++            const Id pointer{
++                ctx.EmitSharedMemoryAccess(ctx.shared_u32, ctx.shared_memory_u32, index)};
++            const auto [scope, semantics]{AtomicArgs(ctx)};
++            return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics, value);
++        });
+ }
+ 
+ Id SharedAtomicU32IncDec(EmitContext& ctx, Id offset,
+                          Id (Sirit::Module::*atomic_func)(Id, Id, Id, Id)) {
+     const Id shift_id{ctx.ConstU32(2U)};
+     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
+-    const Id pointer{ctx.EmitSharedMemoryAccess(ctx.shared_u32, ctx.shared_memory_u32, index)};
+-    const auto [scope, semantics]{AtomicArgs(ctx)};
+-    return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics);
++    return EmitCheckedSharedResult(
++        ctx, offset, SharedMemoryLimit(ctx), 4u, ctx.U32[1],
++        ctx.u32_zero_value, [&] {
++            const Id pointer{
++                ctx.EmitSharedMemoryAccess(ctx.shared_u32, ctx.shared_memory_u32, index)};
++            const auto [scope, semantics]{AtomicArgs(ctx)};
++            return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics);
++        });
+ }
+ 
+ Id SharedAtomicU64(EmitContext& ctx, Id offset, Id value,
+                    Id (Sirit::Module::*atomic_func)(Id, Id, Id, Id, Id)) {
+     const Id shift_id{ctx.ConstU32(3U)};
+     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
+-    const Id pointer{ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index)};
+-    const auto [scope, semantics]{AtomicArgs(ctx)};
+-    return (ctx.*atomic_func)(ctx.U64, pointer, scope, semantics, value);
++    return EmitCheckedSharedResult(
++        ctx, offset, SharedMemoryLimit(ctx), 8u, ctx.U64, ctx.u64_zero_value,
++        [&] {
++            const Id pointer{
++                ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index)};
++            const auto [scope, semantics]{AtomicArgs(ctx)};
++            return (ctx.*atomic_func)(ctx.U64, pointer, scope, semantics, value);
++        });
+ }
+ 
+ Id SharedAtomicU64IncDec(EmitContext& ctx, Id offset,
+                          Id (Sirit::Module::*atomic_func)(Id, Id, Id, Id)) {
+     const Id shift_id{ctx.ConstU32(3U)};
+     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
+-    const Id pointer{ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index)};
+-    const auto [scope, semantics]{AtomicArgs(ctx)};
+-    return (ctx.*atomic_func)(ctx.U64, pointer, scope, semantics);
++    return EmitCheckedSharedResult(
++        ctx, offset, SharedMemoryLimit(ctx), 8u, ctx.U64, ctx.u64_zero_value,
++        [&] {
++            const Id pointer{
++                ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index)};
++            const auto [scope, semantics]{AtomicArgs(ctx)};
++            return (ctx.*atomic_func)(ctx.U64, pointer, scope, semantics);
++        });
+ }
+ 
+ Id SharedAtomicU32CmpSwap(EmitContext& ctx, Id offset, Id value, Id cmp_value) {
+diff --git a/src/shader_recompiler/backend/spirv/emit_spirv_shared_memory.cpp b/src/shader_recompiler/backend/spirv/emit_spirv_shared_memory.cpp
+index 92231bbf..805e45ee 100644
+--- a/src/shader_recompiler/backend/spirv/emit_spirv_shared_memory.cpp
++++ b/src/shader_recompiler/backend/spirv/emit_spirv_shared_memory.cpp
+@@ -1,7 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
++#include "shader_recompiler/backend/spirv/emit_spirv_shared_memory_bounds.h"
+ #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+ 
+ namespace Shader::Backend::SPIRV {
+@@ -9,43 +11,61 @@ namespace Shader::Backend::SPIRV {
+ Id EmitLoadSharedU16(EmitContext& ctx, Id offset) {
+     const Id shift_id{ctx.ConstU32(1U)};
+     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
+-    const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u16, ctx.shared_memory_u16, index);
+-    return ctx.OpLoad(ctx.U16, pointer);
++    return EmitCheckedSharedResult(ctx, offset, SharedMemoryLimit(ctx), 2u,
++                                   ctx.U16, ctx.u16_zero_value, [&] {
++                                       const Id pointer = ctx.EmitSharedMemoryAccess(
++                                           ctx.shared_u16, ctx.shared_memory_u16, index);
++                                       return ctx.OpLoad(ctx.U16, pointer);
++                                   });
+ }
+ 
+ Id EmitLoadSharedU32(EmitContext& ctx, Id offset) {
+     const Id shift_id{ctx.ConstU32(2U)};
+     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
+-    const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u32, ctx.shared_memory_u32, index);
+-    return ctx.OpLoad(ctx.U32[1], pointer);
++    return EmitCheckedSharedResult(ctx, offset, SharedMemoryLimit(ctx), 4u,
++                                   ctx.U32[1], ctx.u32_zero_value, [&] {
++                                       const Id pointer = ctx.EmitSharedMemoryAccess(
++                                           ctx.shared_u32, ctx.shared_memory_u32, index);
++                                       return ctx.OpLoad(ctx.U32[1], pointer);
++                                   });
+ }
+ 
+ Id EmitLoadSharedU64(EmitContext& ctx, Id offset) {
+     const Id shift_id{ctx.ConstU32(3U)};
+     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
+-    const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index);
+-    return ctx.OpLoad(ctx.U64, pointer);
++    return EmitCheckedSharedResult(ctx, offset, SharedMemoryLimit(ctx), 8u,
++                                   ctx.U64, ctx.u64_zero_value, [&] {
++                                       const Id pointer = ctx.EmitSharedMemoryAccess(
++                                           ctx.shared_u64, ctx.shared_memory_u64, index);
++                                       return ctx.OpLoad(ctx.U64, pointer);
++                                   });
+ }
+ 
+ void EmitWriteSharedU16(EmitContext& ctx, Id offset, Id value) {
+     const Id shift{ctx.ConstU32(1U)};
+     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift)};
+-    const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u16, ctx.shared_memory_u16, index);
+-    ctx.OpStore(pointer, value);
++    EmitCheckedSharedWrite(ctx, offset, SharedMemoryLimit(ctx), 2u, [&] {
++        const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u16, ctx.shared_memory_u16, index);
++        ctx.OpStore(pointer, value);
++    });
+ }
+ 
+ void EmitWriteSharedU32(EmitContext& ctx, Id offset, Id value) {
+     const Id shift{ctx.ConstU32(2U)};
+     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift)};
+-    const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u32, ctx.shared_memory_u32, index);
+-    ctx.OpStore(pointer, value);
++    EmitCheckedSharedWrite(ctx, offset, SharedMemoryLimit(ctx), 4u, [&] {
++        const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u32, ctx.shared_memory_u32, index);
++        ctx.OpStore(pointer, value);
++    });
+ }
+ 
+ void EmitWriteSharedU64(EmitContext& ctx, Id offset, Id value) {
+     const Id shift{ctx.ConstU32(3U)};
+     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift)};
+-    const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index);
+-    ctx.OpStore(pointer, value);
++    EmitCheckedSharedWrite(ctx, offset, SharedMemoryLimit(ctx), 8u, [&] {
++        const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index);
++        ctx.OpStore(pointer, value);
++    });
+ }
+ 
+ } // namespace Shader::Backend::SPIRV
+diff --git a/src/shader_recompiler/backend/spirv/emit_spirv_shared_memory_bounds.h b/src/shader_recompiler/backend/spirv/emit_spirv_shared_memory_bounds.h
+new file mode 100644
+index 00000000..fb2f3b04
+--- /dev/null
++++ b/src/shader_recompiler/backend/spirv/emit_spirv_shared_memory_bounds.h
+@@ -0,0 +1,67 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
++
++#pragma once
++
++#include <utility>
++
++#include "shader_recompiler/backend/spirv/spirv_emit_context.h"
++
++namespace Shader::Backend::SPIRV {
++
++// Tamano total de la LDS declarada por el shader (memoria del juego + zona scratch interna).
++inline u32 SharedMemoryLimit(const EmitContext& ctx) {
++    return ctx.runtime_info.hw.cs.shared_memory_size + ctx.info.shared_memory_scratch_size;
++}
++
++inline Id SharedMemoryAccessInBounds(EmitContext& ctx, Id byte_offset, u32 allocation_size,
++                                     u32 access_size) {
++    ASSERT(access_size > 0);
++    // Express the complete-access check as offset < valid_start_count. This avoids overflowing a
++    // dynamic offset while still requiring the final byte of a multi-byte access to fit.
++    const u32 valid_start_count =
++        allocation_size >= access_size ? allocation_size - access_size + 1 : 0;
++    return ctx.OpULessThan(ctx.U1[1], byte_offset, ctx.ConstU32(valid_start_count));
++}
++
++template <typename Emit>
++Id EmitCheckedSharedResult(EmitContext& ctx, Id byte_offset, u32 allocation_size, u32 access_size,
++                           Id result_type, Id zero_value, Emit&& emit) {
++    const Id in_bounds = SharedMemoryAccessInBounds(ctx, byte_offset, allocation_size, access_size);
++    const Id access_label = ctx.OpLabel();
++    const Id merge_label = ctx.OpLabel();
++    const Id out_of_bounds_predecessor = ctx.last_label;
++
++    ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
++    ctx.OpBranchConditional(in_bounds, access_label, merge_label);
++
++    ctx.AddLabel(access_label);
++    // The callback constructs the Workgroup pointer as well as performing the access. Keeping it
++    // in this block avoids an out-of-range OpAccessChain on the rejected path.
++    const Id result = std::forward<Emit>(emit)();
++    ctx.OpBranch(merge_label);
++
++    ctx.AddLabel(merge_label);
++    return ctx.OpPhi(result_type, result, access_label, zero_value, out_of_bounds_predecessor);
++}
++
++template <typename Emit>
++void EmitCheckedSharedWrite(EmitContext& ctx, Id byte_offset, u32 allocation_size, u32 access_size,
++                            Emit&& emit) {
++    const Id in_bounds = SharedMemoryAccessInBounds(ctx, byte_offset, allocation_size, access_size);
++    const Id access_label = ctx.OpLabel();
++    const Id merge_label = ctx.OpLabel();
++
++    ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
++    ctx.OpBranchConditional(in_bounds, access_label, merge_label);
++
++    ctx.AddLabel(access_label);
++    // As above, do not construct the Workgroup pointer until the legal branch is active.
++    std::forward<Emit>(emit)();
++    ctx.OpBranch(merge_label);
++
++    ctx.AddLabel(merge_label);
++}
++
++} // namespace Shader::Backend::SPIRV
+diff --git a/src/video_core/renderdoc.cpp b/src/video_core/renderdoc.cpp
+index 0fe7e9fc..8827ad7a 100644
+--- a/src/video_core/renderdoc.cpp
++++ b/src/video_core/renderdoc.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #include "common/assert.h"
+ #include "common/logging/formatter.h"
+@@ -15,6 +16,8 @@
+ #include <dlfcn.h>
+ #endif
+ 
++#include <algorithm>
++#include <cstdlib>
+ #include <filesystem>
+ 
+ namespace VideoCore {
+@@ -25,6 +28,7 @@ enum class CaptureState {
+     InProgress,
+ };
+ static CaptureState capture_state{CaptureState::Idle};
++static u32 capture_submits_left{0};
+ static std::atomic<u32> screenshot_game_only_count{0};
+ static std::atomic<u32> screenshot_with_overlays_count{0};
+ 
+@@ -99,6 +103,8 @@ void StartCapture() {
+     }
+ 
+     if (capture_state == CaptureState::Triggered) {
++        const char* submits = std::getenv("SHADPS4_RDOC_SUBMITS");
++        capture_submits_left = submits ? std::max(1, std::atoi(submits)) : 1;
+         rdoc_api->StartFrameCapture(nullptr, nullptr);
+         capture_state = CaptureState::InProgress;
+     }
+@@ -109,7 +115,7 @@ void EndCapture() {
+         return;
+     }
+ 
+-    if (capture_state == CaptureState::InProgress) {
++    if (capture_state == CaptureState::InProgress && --capture_submits_left == 0) {
+         rdoc_api->EndFrameCapture(nullptr, nullptr);
+         capture_state = CaptureState::Idle;
+     }
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp b/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
+index 08108e16..1fb8ce29 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #include "common/serdes.h"
+ #include "core/emulator_settings.h"
+@@ -12,7 +13,7 @@
+ 
+ namespace Serialization {
+ /* You should increment versions below once corresponding serialization scheme is changed. */
+-static constexpr u32 ShaderBinaryVersion = 9u;
++static constexpr u32 ShaderBinaryVersion = 10u;
+ static constexpr u32 ShaderMetaVersion = 6u;
+ static constexpr u32 PipelineKeyVersion = 3u;
+ } // namespace Serialization
+diff --git a/src/video_core/renderer_vulkan/vk_runtime.cpp b/src/video_core/renderer_vulkan/vk_runtime.cpp
+index 7e1c025a..7714c31c 100644
+--- a/src/video_core/renderer_vulkan/vk_runtime.cpp
++++ b/src/video_core/renderer_vulkan/vk_runtime.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #include "video_core/buffer_cache/buffer.h"
+ #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+@@ -381,6 +382,50 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
+     dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+ }
+ 
++void Runtime::ReplicateMip(VideoCore::Image* image, u32 src_mip, u32 dst_mip) {
++    const auto& info = image->info;
++    const u32 w = std::min(std::max(info.size.width >> src_mip, 1u),
++                           std::max(info.size.width >> dst_mip, 1u));
++    const u32 h = std::min(std::max(info.size.height >> src_mip, 1u),
++                           std::max(info.size.height >> dst_mip, 1u));
++    const vk::ImageCopy image_copy{
++        .srcSubresource{
++            .aspectMask = image->aspect_mask,
++            .mipLevel = src_mip,
++            .baseArrayLayer = 0,
++            .layerCount = info.resources.layers,
++        },
++        .dstSubresource{
++            .aspectMask = image->aspect_mask,
++            .mipLevel = dst_mip,
++            .baseArrayLayer = 0,
++            .layerCount = info.resources.layers,
++        },
++        .extent = {w, h, 1u},
++    };
++
++    SetBackingSamples(image, info.num_samples);
++    scheduler.EndRendering();
++    if (Transit(image, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eCopy,
++                vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite)) {
++        FlushBarriers();
++    }
++    const auto cmdbuf = scheduler.CommandBuffer();
++    cmdbuf.copyImage(image->GetImage(), vk::ImageLayout::eGeneral, image->GetImage(),
++                     vk::ImageLayout::eGeneral, image_copy);
++    // Que la copia termine antes de cualquier uso posterior de la imagen
++    const vk::MemoryBarrier2 post_copy_barrier = {
++        .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
++        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
++        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
++        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
++    };
++    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
++        .memoryBarrierCount = 1u,
++        .pMemoryBarriers = &post_copy_barrier,
++    });
++}
++
+ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32 slice) {
+     const auto dst_dim = dst->info.props.is_block ? 2 : 0;
+     const auto mip_block_w = std::max(dst->info.size.width >> (mip + dst_dim), 1u);
+diff --git a/src/video_core/renderer_vulkan/vk_runtime.h b/src/video_core/renderer_vulkan/vk_runtime.h
+index 7dffced1..e82d65f2 100644
+--- a/src/video_core/renderer_vulkan/vk_runtime.h
++++ b/src/video_core/renderer_vulkan/vk_runtime.h
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #pragma once
+ 
+@@ -54,6 +55,8 @@ public:
+     void CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
+                              const VideoCore::Buffer* buffer, u64 offset);
+     void CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32 slice);
++    /// Copia el contenido de un nivel de mip a otro dentro de la misma imagen (todas las capas).
++    void ReplicateMip(VideoCore::Image* image, u32 src_mip, u32 dst_mip);
+ 
+     void CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst);
+ 
+diff --git a/src/video_core/texture_cache/image.h b/src/video_core/texture_cache/image.h
+index e200eff0..7f786fea 100644
+--- a/src/video_core/texture_cache/image.h
++++ b/src/video_core/texture_cache/image.h
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #pragma once
+ 
+@@ -156,6 +157,10 @@ public:
+     u64 lru_id{};
+     u64 tick_accessed_last{};
+     u64 hash{};
++    // Niveles de mip respaldados por memoria real del guest. Si una imagen comprimida se amplia
++    // con mas niveles de los que tenia (p.ej. 7 -> 9), los niveles extra no existen en memoria y
++    // leerlos traeria datos de otro recurso; se rellenan desde el ultimo nivel valido. 0 = todos.
++    u32 guest_valid_levels{};
+ 
+     struct {
+         u32 texture : 1;
+diff --git a/src/video_core/texture_cache/image_view.cpp b/src/video_core/texture_cache/image_view.cpp
+index 95daedd2..af8c17a5 100644
+--- a/src/video_core/texture_cache/image_view.cpp
++++ b/src/video_core/texture_cache/image_view.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #include "common/logging/log.h"
+ #include "shader_recompiler/resource.h"
+@@ -118,6 +119,30 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
+         aspect = vk::ImageAspectFlagBits::eStencil;
+     }
+ 
++    // NBA LIVE 19: en texturas comprimidas por bloques, los niveles menores que un bloque
++    // (ambas dimensiones < 4 texeles) no suelen tener datos validos (el juego no los genera y se
++    // quedan con basura -> destellos en reflejos). Las vistas de muestreo se limitan al ultimo
++    // nivel de bloque completo; la GPU usa ese nivel como el mas pequeno.
++    u32 level_count = info.range.extent.levels;
++    if (!info.is_storage && image.info.props.is_block && !image.info.props.is_volume &&
++        vk::to_string(format).find("Block") != std::string::npos) {
++        u32 last_full = 0;
++        for (u32 m = 0; m < image.info.resources.levels; m++) {
++            if (std::max(image.info.size.width >> m, 1u) >= 4 ||
++                std::max(image.info.size.height >> m, 1u) >= 4) {
++                last_full = m;
++            }
++        }
++        if (last_full >= info.range.base.level) {
++            level_count = std::min(level_count, last_full - info.range.base.level + 1);
++        }
++    }
++
++    if (usage_ci.pNext == &min_lod_ci) {
++        min_lod_ci.minLod = std::min(min_lod_ci.minLod,
++                                     static_cast<float>(info.range.base.level + level_count - 1));
++    }
++
+     const auto components = info.mapping == AmdGpu::IdentityMapping
+                                 ? vk::ComponentMapping{}
+                                 : Vulkan::LiverpoolToVK::ComponentMapping(info.mapping);
+@@ -131,7 +156,7 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
+         .subresourceRange{
+             .aspectMask = aspect,
+             .baseMipLevel = info.range.base.level,
+-            .levelCount = info.range.extent.levels,
++            .levelCount = level_count,
+             .baseArrayLayer = info.range.base.layer,
+             .layerCount = info.range.extent.layers,
+         },
+diff --git a/src/video_core/texture_cache/texture_cache.cpp b/src/video_core/texture_cache/texture_cache.cpp
+index 1e7a23de..145d9f19 100644
+--- a/src/video_core/texture_cache/texture_cache.cpp
++++ b/src/video_core/texture_cache/texture_cache.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// Modified 2026-10-13 for the unofficial NBA LIVE 19 fork (see README-NBA19.md).
+ 
+ #include <limits>
+ #include <xxhash.h>
+@@ -22,6 +23,8 @@
+ 
+ namespace VideoCore {
+ 
++
++
+ static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
+ static constexpr u32 MAX_IMAGE_VIEWS = std::numeric_limits<u16>::max();
+ static constexpr u32 MAX_SAMPLERS = std::numeric_limits<u16>::max();
+@@ -244,6 +247,12 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
+         // Inherit image usage
+         auto& new_image = slot_images[new_image_id];
+         new_image.usage = cache_image.usage;
++        if (new_info.props.is_block &&
++            new_info.resources.levels > cache_image.info.resources.levels) {
++            new_image.guest_valid_levels = cache_image.guest_valid_levels
++                                               ? cache_image.guest_valid_levels
++                                               : cache_image.info.resources.levels;
++        }
+         if (new_info.num_samples == 1 &&
+             (new_info.resources.layers > cache_image.info.resources.layers ||
+              new_info.resources.levels > cache_image.info.resources.levels)) {
+@@ -502,7 +511,27 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
+     auto& src_image = slot_images[image_id];
+     auto& new_image = slot_images[new_image_id];
+ 
++    if (info.props.is_block && info.resources.levels > src_image.info.resources.levels) {
++        new_image.guest_valid_levels = src_image.guest_valid_levels
++                                           ? src_image.guest_valid_levels
++                                           : src_image.info.resources.levels;
++    }
+     RefreshImage(new_image);
++    // Vista comprimida de una imagen sin comprimir (p.ej. BC6H generado por la GPU via R32G32B32A32).
++    // El juego solo escribe los niveles de al menos un bloque; los niveles menores (texeles < 4x4)
++    // quedan sin inicializar. Se rellenan desde el ultimo nivel de bloque completo antes de copiar.
++    if (info.props.is_block && !src_image.info.props.is_block) {
++        const u32 levels = std::min(info.resources.levels, src_image.info.resources.levels);
++        u32 last_full = 0;
++        for (u32 m = 0; m < levels; m++) {
++            if (std::max(info.size.width >> m, 1u) >= 4 || std::max(info.size.height >> m, 1u) >= 4) {
++                last_full = m;
++            }
++        }
++        for (u32 m = last_full + 1; m < levels; m++) {
++            runtime.ReplicateMip(&src_image, last_full, m);
++        }
++    }
+     runtime.CopyImage(&src_image, &new_image);
+ 
+     if (src_image.binding.is_bound || src_image.binding.is_target) {
+@@ -791,6 +820,7 @@ void TextureCache::RefreshImage(Image& image) {
+ 
+     const u32 num_layers = image.info.resources.layers;
+     const u32 num_mips = image.info.resources.levels;
++
+     const bool is_gpu_modified = True(image.flags & ImageFlagBits::GpuModified);
+     const bool is_gpu_dirty = True(image.flags & ImageFlagBits::GpuDirty);
+ 
+@@ -800,7 +830,19 @@ void TextureCache::RefreshImage(Image& image) {
+         const u32 height = std::max(image.info.size.height >> m, 1u);
+         const u32 depth =
+             image.info.props.is_volume ? std::max(image.info.size.depth >> m, 1u) : 1u;
+-        const auto [mip_size, mip_pitch, mip_height, mip_offset] = image.info.mips_layout[m];
++        // Los niveles sin memoria propia se cargan desde el ultimo nivel valido (ver image.h).
++        // En formatos por bloques, los niveles menores que un bloque (ambas dimensiones < 4) no los
++        // generan las herramientas de texturas: se toman del ultimo nivel de al menos un bloque.
++        u32 src_mip = image.guest_valid_levels && m >= image.guest_valid_levels
++                          ? image.guest_valid_levels - 1
++                          : m;
++        if (image.info.props.is_block && !image.info.props.is_volume) {
++            while (src_mip > 0 && std::max(image.info.size.width >> src_mip, 1u) < 4 &&
++                   std::max(image.info.size.height >> src_mip, 1u) < 4) {
++                --src_mip;
++            }
++        }
++        const auto [mip_size, mip_pitch, mip_height, mip_offset] = image.info.mips_layout[src_mip];
+         const u32 extent_width = mip_pitch ? std::min<u32>(mip_pitch, width) : width;
+         const u32 extent_height = mip_height ? std::min<u32>(mip_height, height) : height;
+         image_copies.push_back({
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 5aa2901c..7e5afbbd 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -262,6 +262,7 @@ endforeach()
+ set(HTTP_TEST_SOURCES
+     # Under test
+     ${CMAKE_SOURCE_DIR}/src/core/libraries/network/http.cpp
++    ${CMAKE_SOURCE_DIR}/src/core/net/host_override.cpp
+     # Required to link RegisterLib's LIB_FUNCTION calls and the logger's
+     # access to EmulatorSettings.
+     ${CMAKE_SOURCE_DIR}/src/core/emulator_settings.cpp
+@@ -452,6 +453,7 @@ set(NET_LIB_TEST_SOURCES
+     ${CMAKE_SOURCE_DIR}/src/core/libraries/net/net_p2p.cpp
+     ${CMAKE_SOURCE_DIR}/src/core/libraries/net/net_p2p_ioctl.cpp
+     ${CMAKE_SOURCE_DIR}/src/core/libraries/net/net_resolver.cpp
++    ${CMAKE_SOURCE_DIR}/src/core/net/host_override.cpp
+     ${CMAKE_SOURCE_DIR}/src/core/libraries/net/net_translate.cpp
+ 
+     # Logging and RegisterLib support
